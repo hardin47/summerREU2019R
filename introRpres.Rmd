@@ -1,0 +1,1005 @@
+---
+title: "R Workshop - HMC REU"
+author: "Jo Hardin (originally, Randy Prium)"
+date: "6/4/2019"
+output: 
+  ioslides_presentation:
+    fig_height: 3
+    widescreen: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy = FALSE, size = "small", message=FALSE, warning=FALSE)
+require(dplyr)
+require(tidyr)
+require(ggplot2)
+require(babynames)
+require(googlesheets)
+require(nycflights13)
+require(NHANES)
+require(lattice)
+Babynames <- babynames
+names(NHANES) <- tolower(names(NHANES))
+```
+
+# Introduction to R & the Tidyverse
+
+## Some details ...
+
+1. Quick tour of R
+2. Tidyverse
+3. ggplot2
+
+
+##  Information
+
+The slides and worksheets are at:
+
+https://github.com/hardin47/summerREU2019R
+
+
+##  R Markdown
+
+* Notebook structure were text, code, output are combined
+* Benefit that R Markdown files are all text (easy to port)
+* Uses Markdown language to format
+* Plays nicely with RStudio and GitHub
+
+
+##  R Markdown file
+
+An R Markdown chunk looks like this:
+
+````
+```{r}`r ''`
+  1 + 1
+```
+````
+
+But typically, you will want text surrounding your work.
+
+````
+Here I've done some arithmetic as part of my analysis:
+```{r}`r ''`
+  1 + 1
+```
+````
+
+## Rendering an R Markdown file
+
+
+
+# Tidyverse
+
+
+## Set Up 
+
+```{r}
+require(dplyr); require(tidyr)
+require(ggplot2); require(lattice)
+require(googlesheets)
+require(babynames); require(nycflights13); require(NHANES)
+Babynames <- babynames
+names(NHANES) <- tolower(names(NHANES))
+```
+
+## Tidy Data
+
+- rows (cases/observational units) and 
+- columns (variables).  
+
+- The key is that *every* row is a case and *every* column is a variable.  
+
+- No exceptions.
+
+## Chaining 
+
+The pipe syntax (%>%) takes a data frame (or data table) and sends it to the argument of a function.  
+
+
+- x %>% f(y) is the same as f(x, y)
+
+- y %>% f(x, ., z) is the same as f(x,y,z)
+
+
+## Building Tidy Data
+
+- object_name = function_name(arguments) 
+- object_name = data_table %>% function_name(arguments) 
+- object_name = data_table %>%  
+  &nbsp; &nbsp; &nbsp;    &nbsp; &nbsp; &nbsp; function_name(arguments) %>%  
+  &nbsp; &nbsp; &nbsp;     &nbsp; &nbsp; &nbsp; function_name(arguments)
+
+- in chaining, the value (on left) %>% is **first argument** to the function (on right)
+
+
+## 5 Main Data Verbs
+
+Data verbs take data tables as input and give data tables as output
+
+1. select(): removes unwanted *variables* (and rename() )
+2. filter():  removes/subsets unwanted *cases*
+3. mutate(): transforms the variable (and transmute() like mutate, returns only new variables)
+4. arrange(): reorders the cases
+5. summarize(): computes summary statistics
+
+## Other Data Verbs
+- distinct(): returns the unique values in a table
+- sample_n(): take a random row(s)
+- head():  grab the first few rows
+- tail(): grab the last few rows
+- group_by(): SUCCESSIVE functions are applied to groups
+- summarise():  
+    + min(), max(), mean(), sum(), sd(), median(), and IQR()
+    + n(): number of observations in the current group
+    + n_distinct(): number of unique values
+    + first_value(), last_value(), and nth_value(x, n): (like x[1], x[length(x)], and x[n] )
+
+
+
+
+## Finally, some Examples!
+
+```{r}
+Babynames %>% nrow()
+Babynames %>% names()
+```
+
+## Finally, some Examples!
+
+```{r}
+Babynames %>% glimpse()
+```
+
+## Finally, some Examples!
+
+```{r}
+Babynames %>% head()
+```
+
+## Finally, some Examples!
+
+```{r}
+Babynames %>% sample_n(size=5)
+```
+
+
+## NHANES Data
+
+```{r}
+names(NHANES)
+```
+
+## 1. select(): removes unwanted *variables*
+
+
+find the sleep variables
+
+```{r}
+NHANESsleep <- NHANES %>% 
+  select(gender, age, weight, race1, race3, education, sleeptrouble,
+         sleephrsnight, tvhrsday, tvhrsdaychild, physactive)
+names(NHANESsleep)
+dim(NHANESsleep)
+```
+
+## 2. filter():  removes/subsets unwanted *cases* 
+
+subset for college students
+
+```{r fig.width=5, fig.height=3, fig.center=TRUE}
+NHANESsleep <- NHANESsleep %>% filter(age %in% c(18:22))
+histogram(~age, data=NHANESsleep)
+```
+
+## 3. mutate(): transforms the variable 
+
+mutate or transmute to create a new variable?
+
+```{r }
+NHANESsleep %>% mutate(weightlb = weight*2.2) %>% head(3)
+```
+
+## 3. mutate(): transforms the variable 
+
+mutate or transmute to create a new variable?
+
+```{r }
+NHANESsleep %>% transmute(weightlb = weight*2.2) %>% head(3)
+```
+
+## 3. mutate(): transforms the variable 
+
+mutate or transmute to create a new variable?
+
+```{r }
+NHANESsleep <- NHANESsleep %>% mutate(weightlb = weight*2.2)
+```
+
+
+## 5. summarize(): computes summary statistics
+
+```{r}
+# number of people (cases) in NHANES
+NHANES %>% summarise(n())
+```
+
+## 5. summarize(): computes summary statistics
+
+```{r}
+# total weight of all the people in NHANES (silly)
+NHANES %>% 
+  mutate(weightlb = weight*2.2) %>% 
+  summarise(sum(weightlb, na.rm=TRUE))
+```
+
+## 5. summarize(): computes summary statistics
+
+```{r}
+# mean weight of all the people in NHANES
+NHANES %>% 
+  mutate(weightlb = weight*2.2) %>% 
+  summarise(mean(weightlb, na.rm=TRUE))
+```
+
+## 5. summarize() with group_by()
+
+```{r}
+# mean weight of all the people in NHANES
+NHANES %>% 
+  mutate(weightlb = weight*2.2) %>%  
+  group_by(education) %>%  
+  summarise(mean(weightlb, na.rm=TRUE))
+```
+
+## 4. arrange(): reorders the cases
+
+```{r}
+# mean weight of all the people in NHANES
+NHANES %>% mutate(weightlb = weight*2.2) %>% 
+  group_by(education) %>% 
+  summarise(avewt = mean(weightlb, na.rm=TRUE)) %>% 
+  arrange(avewt)
+```
+
+
+
+# ggplot2 (the packages), ggplot (the function)
+
+## goals
+
+What I will try to do
+
+ * give a tour of `ggplot2`
+ 
+ * explain how to think about plots the `ggplot2` way
+ 
+ * prepare/encourage you to learn more later
+ 
+What I can't do in one session
+
+ * show every bell and whistle
+ 
+ * make you an expert at using `ggplot2`
+
+
+## Set up
+
+```{r}
+require(mosaic)
+require(lubridate) # package for working with dates
+data(Births78)     # restore fresh version of Births78
+head(Births78, 3)
+```
+
+
+## The grammar of graphics
+
+**geom**: the geometric "shape" used to display data (glyph)
+ 
+ * bar, point, line, ribbon, text, etc.
+ 
+**aesthetic**: an attribute controlling how geom is displayed
+
+ * x position, y position, color, fill, shape, size, etc.
+
+**scale**: conversion of raw data to visual display
+
+ * particular assignment of colors, shapes, sizes, etc. 
+ 
+**guide**: helps user convert visual data back into raw data (legends, axes)
+
+**stat**: a transformation applied to data before geom gets it
+
+ * example: histograms work on binned data
+ 
+## How do we make this plot?
+
+```{r, echo = FALSE, fig.height = 3}
+ggplot(
+  data = Births78, aes(x = date, y = births)) + 
+  geom_point()
+```
+
+
+
+Two Questions:
+
+ 1. What do we want R to do?  (What is the goal?)
+ 
+ 
+ 2. What does R need to know?
+
+## How do we make this plot?
+
+```{r, echo = FALSE, fig.height = 1.5}
+ggplot(
+  data = Births78, aes(x = date, y = births)) + 
+  geom_point()
+```
+
+Two Questions:
+
+ 1. Goal: scatterplot = a plot with points
+ 
+ 2. What does R need to know?
+ 
+    * data source: `Births78`
+
+    * aesthetics: 
+ 
+        * `date -> x`
+        * `births -> y`
+        * default color (same for all points) 
+
+
+## How do we make this plot?
+
+```{r, echo = FALSE, fig.height = 1}
+ggplot(data = Births78, aes(x = date, y = births)) + 
+  geom_point()
+```
+
+ 1. Goal: scatterplot = a plot with points
+ 
+    * `ggplot() + geom_point()`
+ 
+ 2. What does R need to know?
+ 
+    * data source: `data = Births78`
+
+    * aesthetics: `aes(x = date, y = births)`
+
+first option
+
+```{r, eval = FALSE, fig.height = 1.5}
+ggplot(data = Births78, aes(x = date, y = births)) + 
+  geom_point()
+```
+
+second option
+
+```{r, eval = FALSE, fig.height = 1.5}
+ggplot() +
+  geom_point(data = Births78, aes(x = date, y = births))  
+```
+
+## How do we make this plot?
+
+```{r, echo = FALSE, fig.height=3}
+Births78 <- 
+  Births78 %>% mutate(wday = wday(date, label = TRUE))
+ggplot(data = Births78) +
+  geom_point(aes(x = date, y = births, color = wday)) 
+```
+
+What has changed?  
+
+ * new aesthetic: mapping color to day of week
+
+## Adding day of week to the data set
+
+The `wday()` function in the `lubridate` package computes 
+the day of the week from a date.
+
+```{r}
+Births78 <-  
+  Births78 %>% 
+  mutate(wday = wday(date, label = TRUE))
+```
+
+
+```{r, fig.height = 2.0}
+ggplot(data = Births78) +
+  geom_point(aes(x = date, y = births, color = wday))
+```
+
+## How do we make this plot?
+
+```{r, echo = FALSE}
+ggplot(data = Births78) +
+  geom_line(aes(x = date, y = births, color = wday)) 
+```
+
+
+This time we use lines instead of dots
+
+```{r, eval = FALSE}
+ggplot(data = Births78) +
+  geom_line(aes(x = date, y = births, color = wday)) 
+```
+
+## How do we make this plot?
+
+```{r, echo = FALSE}
+ggplot(data = Births78, aes(x = date, y = births, color = wday)) + 
+  geom_point() + 
+  geom_line()
+```
+
+
+This time we have two **layers**, one with points and one with
+lines
+
+```{r, eval = FALSE}
+ggplot(data = Births78, 
+       aes(x = date, y = births, color = wday)) + 
+  geom_point() +  geom_line()
+```
+
+ *  The layers are placed one on top of the other:  the points 
+are *below* and the lines are *above*.   
+
+ * `data` and `aes` specified in `ggplot()` affect all geoms
+ 
+## Alternative Syntax
+
+```{r}
+Births78 %>% 
+  ggplot(aes(x = date, y = births, color = wday)) + 
+  geom_point() + 
+  geom_line()
+```
+
+## What does this do?
+
+```{r, eval = FALSE}
+Births78 %>%
+  ggplot(aes(x = date, y = births, color = "navy")) + 
+  geom_point()  
+```
+
+
+```{r, echo = FALSE}
+Births78 %>% 
+  ggplot(aes(x = date, y = births, color = "navy")) + 
+  geom_point()  
+```
+
+This is *mapping* the color aesthetic to a new variable with 
+only one value ("navy").  
+So all the dots get set to the same color, but it's not navy.
+
+
+## Setting vs. Mapping
+
+If we want to *set* the color to be navy for all of the dots, we do 
+it this way:
+
+```{r}
+Births78 %>%
+  ggplot(aes(x = date, y = births)) +   # map these 
+  geom_point(color = "navy")        # set this
+```
+
+* Note that `color = "navy"` is now outside of the aesthetics list.  That's how `ggplot2` distinguishes between mapping and setting.
+
+## How do we make this plot?
+
+```{r, echo = FALSE}
+Births78 %>%
+  ggplot(aes(x = date, y = births)) + 
+  geom_line(aes(color = wday)) +        # map color here
+  geom_point(color = "navy")            # set color here
+```
+
+
+```{r, eval = FALSE}
+Births78 %>%
+  ggplot(aes(x = date, y = births)) + 
+  geom_line(aes(color = wday)) +       # map color here
+  geom_point(color = "navy")           # set color here
+```
+
+* `ggplot()` establishes the default data and aesthetics
+for the geoms, but each geom may change these defaults.
+
+* good practice: put into `ggplot()` the things that affect all (or most) of the layers; rest in `geom_blah()`
+
+## Other geoms
+
+```{r, echo = TRUE, comment = NA}
+apropos("^geom_") %>% head(21)
+```
+
+help pages will tell you their aesthetics, default stats, etc.
+
+```{r, eval = FALSE}
+?geom_area             # for example
+```
+
+
+## Let's try geom_area
+
+```{r, eval = TRUE}
+Births78 %>%
+  ggplot(aes(x = date, y = births, fill = wday)) + 
+  geom_area()
+```
+
+This is not a good plot
+
+* overplotting is hiding much of the data
+* extending y-axis to 0 may or may not be desirable.
+
+## Side note: what makes a plot good?
+
+Most (all?) graphics are intended to help us make comparisons
+
+* How does something change over time?
+* Do my treatments matter?  How much?
+* Do men and women respond the same way?
+
+**Key plot metric:** Does my plot make the comparisions 
+I am interested in 
+
+* easily, and 
+* accurately?
+
+## Time for some different data
+
+HELPrct: Health Evaluation and Linkage to Primary care randomized
+clinical trial
+```{r, eval = FALSE}
+?HELPrct
+```
+
+Subjects admitted for treatment for addiction to one 
+of three substances.
+
+## Why are these people in the study?
+
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = substance)) + 
+  geom_bar()
+```
+
+
+
+* Hmm.  What's up with `y`?
+
+    * `stat_bin()` is being applied to the data before the 
+    `geom_bar()` gets to do its thing.  Binning creates the
+    `y` values.
+
+## Data Flow
+
+\[
+\mbox{org data}
+\stackrel{\mbox{\ stat\ }}{\longrightarrow}
+\mbox{statified}
+\stackrel{\mbox{aesthetics}}{\longrightarrow}
+\mbox{aesthetic data}
+\stackrel{\mbox{\ scales\ }}{\longrightarrow}
+\mbox{scaled data}
+\]
+
+Simplifications:
+
+ * Aesthetics get computed twice, once before the stat and again after.   Examples: bar charts, histograms
+ 
+* We need to look at the aesthetics to figure out which variable 
+   to bin 
+   
+    * then the stat does the binning
+    * bin counts become part of the aesthetics for geom: `y = ..count..`
+    
+* This process happens *in each layer*
+
+* `stat_identity()` is the "do nothing" stat.
+
+
+## How old are people in the HELP study?
+
+```{r, fig.height = 1.5, message = TRUE}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_histogram()
+```
+
+Notice the messages
+
+* `stat_bin`:  Histograms are not mapping the raw data but
+binned data.  
+`stat_bin()` performs the data transformation.
+
+* `binwidth`: a default binwidth has been selected, but we should
+really choose our own.
+
+## Setting the binwidth manually
+
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_histogram(binwidth = 2)
+```
+
+
+## How old are people in the HELP study? -- Other geoms
+
+```{r, fig.height = 1.7}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_freqpoly(binwidth = 2)
+```
+
+```{r, fig.height = 1.7}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_density()
+```
+
+## Selecting stat and geom manually
+
+Every geom comes with a default stat
+
+* for simple cases, the stat is `stat_identity()` which does nothing
+* we can mix and match geoms and stats however we like
+
+```{r, fig.height = 2.0}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_line(stat = "density")
+```
+
+## Selecting stat and geom manually
+
+Every stat comes with a default geom, every geom with a default stat
+
+* we can specify stat instead of geom, if we prefer
+* we can mix and match geoms and stats however we like
+
+```{r, fig.height = 2.0}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  stat_density( geom = "line")
+```
+
+## More combinations
+
+
+```{r, fig.height = 1.7}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_point(stat = "bin", binwidth = 3) + 
+  geom_line(stat = "bin", binwidth = 3)  
+```
+
+```{r, fig.height = 1.7}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_area(stat = "bin", binwidth = 3)  
+```
+
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = age)) + 
+  geom_point(stat = "bin", binwidth = 3, aes(size = ..count..)) +
+  geom_line(stat = "bin", binwidth = 3) 
+```
+
+## Your turn:  How much do they drink? (i1)
+
+Create a plot that shows the distribution of the average daily
+alcohol consumption in the past 30 days (`i1`).
+
+## How much do they drink? (i1)
+
+
+```{r, fig.height = 1.5}
+HELPrct %>% 
+  ggplot(aes(x = i1)) + geom_histogram()
+```
+```{r, fig.height = 1.5}
+HELPrct %>% 
+  ggplot(aes(x = i1)) + geom_area(stat = "density")
+```
+
+## Covariates: Adding in more variables
+
+
+Q. How does alcohol consumption (or age, your choice)
+differ by sex and substance (alcohol, cocaine, heroin)?
+
+Decisions:
+
+* How will we display the variables: 
+`i1` (or `age`), `sex`, `substance`
+
+* What comparisons are we most interested in?
+
+Give it a try.
+
+* Note: I'm cheating a bit.  You may want to do some things
+I haven't shown you yet.  (Feel free to ask.)
+
+## Covariates: Adding in more variables
+
+
+Using color and linetype:
+
+```{r, fig.height = 1.3}
+HELPrct %>% 
+  ggplot(aes(x = i1, color = substance, linetype = sex)) + 
+  geom_line(stat = "density")
+```
+
+Using color and facets
+
+```{r, fig.height = 1.3}
+HELPrct %>% 
+  ggplot(aes(x = i1, color = substance)) + 
+  geom_line(stat = "density") + facet_grid( . ~ sex )
+```
+
+## Boxplots 
+
+Boxplots use `stat_quantile()` 
+which computes a five-number summary 
+(roughly the five quartiles of the data) and uses them to define a 
+"box" and "whiskers".
+The quantitative variable must be `y`, and there must be an 
+additional `x` variable. 
+
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = substance, y = age, color = sex)) + 
+  geom_boxplot()
+```
+
+## Horizontal boxplots
+
+Horizontal boxplots 
+are obtained by flipping the coordinate system:
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = substance, y = age, color = sex)) + 
+  geom_boxplot() +
+  coord_flip()
+```
+
+* `coord_flip()` may be used with other plots as well to reverse the roles
+of `x` and `y` on the plot.
+
+## Give me some space
+
+We've triggered a new feature: `dodge` (for dodging things left/right).
+We can control how much if we set the dodge manually.
+
+```{r}
+HELPrct %>% 
+  ggplot(aes(x = substance, y = age, color = sex)) + 
+  geom_boxplot(position = position_dodge(width = 1)) 
+```
+
+
+## Issues with bigger data
+
+
+```{r}
+require(NHANES)
+dim(NHANES)
+NHANES %>%  ggplot(aes(x = height, y = weight)) +
+  geom_point() + facet_grid( gender ~ pregnantnow )
+```
+
+* Although we can see a generally positive association (as we would 
+expect), the overplotting may be hiding information.
+
+## Using alpha (opacity)
+
+
+One way to deal with overplotting is to set the opacity low.
+
+```{r}
+NHANES %>% 
+  ggplot(aes(x = height, y = weight)) +
+  geom_point(alpha = 0.01) + facet_grid( gender ~ pregnantnow )
+```
+
+## geom_density2d
+
+Alternatively (or simultaneously) we might prefere a different 
+geom altogether.
+
+```{r}
+NHANES %>% 
+  ggplot(aes(x = height, y = weight)) +
+  geom_density2d() + facet_grid( gender ~ pregnantnow )
+```
+
+
+<!--
+## geom_hex
+
+```{r}
+NHANES %>% 
+  ggplot(aes(x = height, y = weight)) +
+  ggplot2::geom_hex() + facet_grid(gender ~ pregnantnow)
+```
+-->
+
+## Multiple layers
+
+
+```{r}
+ggplot( data = HELPrct, aes(x = sex, y = age)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_jitter(alpha = .6) +
+  coord_flip()
+```
+
+## Multiple layers
+
+
+```{r}
+ggplot( data = HELPrct, aes(x = sex, y = age)) +
+  geom_boxplot(outlier.size = 0) +
+  geom_point(alpha = .6, position = position_jitter(width = .1, height = 0)) +
+  coord_flip()
+```
+
+## Labeling
+
+
+```{r}
+NHANES %>% 
+  ggplot(aes(x = height, y = weight)) +
+  geom_point() + facet_grid( gender ~ pregnantnow ) +
+  labs(x = "waist (m)", y = "weight (kg)", 
+       title = "weight vs height")
+```
+
+## Things I haven't mentioned (much)
+
+
+ * scales (fine tuning mapping from data to plot)
+ 
+ * guides (so reader can map from plot to data)
+ 
+ * coords (`coord_flip()` is good to know about)
+ 
+ * themes (for customizing appearance)
+
+```{r}
+require(ggthemes)
+ggplot(data = Births78, aes(x = date, y = births)) +
+       geom_point() + theme_wsj() # wall street journal
+```
+
+## Things I haven't mentioned (much)
+
+
+ * scales (fine tuning mapping from data to plot)
+ 
+ * guides (so reader can map from plot to data)
+ 
+ * coords (`coord_flip()` is good to know about)
+ 
+ * themes (for customizing appearance)
+
+```{r, eval = TRUE}
+require(xkcd)
+ggplot(data = Births78, aes(x = date, y = births, colour = wday)) +
+       geom_smooth(se = FALSE) + theme_xkcd()
+```
+
+
+
+## Things I haven't mentioned (much)
+
+
+ * scales (fine tuning mapping from data to plot)
+ 
+ * guides (so reader can map from plot to data)
+ 
+ * coords (`coord_flip()` is good to know about)
+ 
+ * themes (for customizing appearance)
+ 
+ * position (`position_dodge()` can be used for side by side bars)
+ 
+```{r}
+ggplot(data = HELPrct, 
+       aes(x = substance, y = age, color = sex)) +
+  geom_violin(position = position_dodge()) +
+  geom_point(aes(color = sex, fill = sex), 
+             position = position_jitterdodge()) 
+```
+
+
+## Things I haven't mentioned (much)
+
+
+ * scales (fine tuning mapping from data to plot)
+ 
+ * guides (so reader can map from plot to data)
+ 
+ * themes (for customizing appearance)
+ 
+ * position (`position_dodge()`, `position_jitterdodge()`,
+ `position_stack()`, etc.)
+
+## A little bit of everything
+
+```{r, tidy = FALSE}
+ggplot(data = HELPrct, 
+       aes(x = substance, y = age, color = sex)) +
+  geom_boxplot(position = position_dodge(width = 1)) +
+  geom_point(aes(fill = sex), alpha = .5, 
+    position = position_jitterdodge(dodge.width = 1)) + 
+  facet_wrap(~homeless)
+```
+
+
+
+## Want to learn more?
+
+ * [docs.ggplot2.org/](http://docs.ggplot2.org/)
+ 
+ * Winston Chang's: *R Graphics Cookbook*
+ 
+ * google whatevery you want plus `ggplot2`
+ 
+
+## What's around the corner?
+
+
+`ggvis` 
+
+ * dynamic graphics (brushing, sliders, tooltips, etc.)
+ 
+ * similar structure to `ggplot2` but different syntax and names
+ 
+
+ 
+Dynamic documents
+
+ * combination of `RMarkdown`, `ggvis`, and `shiny`
+ 
+ 
+# GitHub in R
+
+##  GitHub
+
+* GitHub is far and away the best method for collaborative and reproducible research.  
+
+* Small learning curve, but well worth it in the end.
+
+* Highly recommend working with GitHub this summer while you have lots of time to try things and make mistakes
+
+* Today is already too packed to learn GitHub, too
+
+
+## Keep going!
+
+### Keep practicing, keep learning
+
+<div align="center">
+![ImpostR Syndrome](images/impostR.JPG)
+</div>
+
+
+
+

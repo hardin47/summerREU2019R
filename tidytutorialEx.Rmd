@@ -1,0 +1,106 @@
+---
+title: "An Introduction to dplyr"
+author: "Miles Ott (with additions by Nicholas Horton & Jo Hardin)"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(
+  echo = TRUE, tidy = FALSE, size = "small",
+  fig.width = 8, fig.height = 6)
+
+require(mosaic)
+require(ggformula)
+require(ggplot2movies)  # gets us movies dataset
+
+Movies <- movies
+
+Slim_Movies <- 
+  movies %>% 
+  select(title, budget, length)
+
+RecentMovies <-
+  movies %>%
+  filter(year > 2000) %>%
+  filter(mpaa != "") 
+```
+
+
+## Your Turn 
+
+### A Smaller Data Set
+
+When starting, it can be helpful to work with a small subset of the data.  When you have your data wrangling statements in working order, shift to the entire data table.
+
+```{r, small-subset }
+RecentMovies <-
+  Movies %>%
+  filter(year > 2000) %>%
+  filter(mpaa != "") 
+```
+
+
+You can use the smaller data set as you are figuring out the solutions to these 
+exercises.  Once have it sussed, you can switch to the full `Movies` data.
+
+### Exercises
+
+#### What is the average IMDB user rating?
+
+```{r, rating, eval = FALSE }
+RecentMovies %>%
+  summarise(avg = ????(rating)) 
+```
+
+
+#### What is the average IMDB user rating of movies for each mpaa category?
+
+```{r, rating-by-cat, eval = FALSE }
+RecentMovies %>% 
+  group_by(????) %>% 
+  summarise(avg = ????(rating))
+```
+
+#### How many Action Movies in each year?
+
+```{r, action-movies, eval = FALSE }
+RecentMovies %>%
+  group_by(????) %>%
+  summarise(Actioncount = sum(????))
+```
+
+#### How many Comedies of each mpaa rating in each year?
+
+```{r, comedies, eval = FALSE }
+RecentMovies %>%
+  group_by(????, ????) %>%
+  summarise(????)
+```
+
+
+
+#### plot the average IMDB ratings for movies with mpaa "R" over the years.
+
+```{r r-movies, eval = FALSE }
+RMovies <-
+  Movies %>%
+  filter(mpaa == "R") %>%     # just the rated R movies
+  group_by(year) %>%          # for each year 
+  summarise(mean_user_rating = ????)
+
+ggplot(RMovies, aes(x = ????, y = ????)) + geom_????()
+```
+
+
+####  same plot with all mpaa ratings over the years.
+
+Note that I'm not actually keeping the dataframe anymore:
+```{r eval = FALSE }
+Movies %>%
+  group_by(????, ????) %>%          # for each year  and rating
+  summarise(mean_user_rating = ????) %>%
+  ggplot(aes(x = ????, y = ????, color = ????)) + geom_????()
+```
+
+

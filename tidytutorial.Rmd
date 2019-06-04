@@ -1,0 +1,310 @@
+---
+title: "An Introduction to dplyr"
+author: "Miles Ott (with additions by Nicholas Horton & Jo Hardin)"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(
+  echo = TRUE, tidy = FALSE, size = "small",
+  fig.width = 8, fig.height = 6)
+
+require(mosaic)
+require(ggformula)
+require(ggplot2movies)  # gets us movies dataset
+
+Movies <- movies
+
+Slim_Movies <- 
+  movies %>% 
+  select(title, budget, length)
+
+RecentMovies <-
+  movies %>%
+  filter(year > 2000) %>%
+  filter(mpaa != "") 
+```
+
+## Getting Organized
+
+### In order to analyze your data you need to organize your data correctly
+
+- Keeping your data **clean** and **tidy** is an important step of every data project
+
+- Goal: learn how to take the data set you **have** and tidy it up to be the data set you **want** for your analyses
+
+
+### Tidy Data 
+
+- rows (cases/observational units) and 
+- columns (variables).  
+
+- The key is that *every* row is a case and *every* column is a variable.  
+
+- No exceptions.
+
+
+## Chaining 
+
+The pipe syntax (`%>%`) takes a data frame (or data table) and sends it to the argument of a function.  
+
+- `x %>% f(y)` is the same as `f(x, y)`
+
+- `y %>% f(x, ., z)` is the same as `f(x,y,z)`
+
+
+## Building Tidy Data 
+
+```{r, eval = FALSE}
+object_name <- function_name(arguments) 
+object_name <- data_table %>% function_name(arguments) 
+
+object_name <-   
+  data_table %>%  
+  function_name(arguments) %>%  
+  function_name(arguments)
+```
+
+- in chaining, the value (on left) %>% is **first argument** to the function (on right)
+
+## 5 Main Data Verbs
+
+Data verbs take data tables as input and give data tables as output
+
+`summarise()`: computes summary statistics
+
+### Rows 
+
+`filter()`:  subsets unwanted *cases* 
+`arrange()`: reorders the *cases* 
+
+### Columns
+
+`select()`: subsets *variables* (and `rename()` )
+`mutate()`: transforms the *variable* (and `transmute()` like mutate, returns only new variables)
+
+### Other Data Verbs
+
+- `distinct()`: returns each unique row once
+- `sample_n()`: take random row(s)
+- `head()`:  grab the first few rows
+- `tail()`: grab the last few rows
+- `group_by()`: SUCCESSIVE functions are applied to groups
+- `ungroup()`:  reverse the grouping action
+- `summarise()`:  
+    + `min()`, `max()`, `mean()`, `sum()`, `sd()`, `median()`, and `IQR()`
+    + `n()`: number of observations in the current group
+    + `n_distinct()`: number of unique values of a variable
+    + `first_value()`, `last_value()`, and `nth_value(x, n)`: (like `x[1]`, `x[length(x)]`, and `x[n]` )
+
+
+## Movies Data
+
+The `Movies` data set contains information about movies.
+
+```{r, inspect }
+inspect(Movies)
+```
+
+
+```{r, nrow }
+Movies %>% nrow()
+Movies %>% names()
+```
+
+
+### Selecting some of the variables
+
+#### Exercise
+
+Let's make a data set that has fewer variables.
+
+```{r, slim-movies }
+Slim_Movies <- 
+  Movies %>% select(title, budget, length)
+Slim_Movies %>% names()
+```
+
+- Reminder: select() is for *columns*
+
+- Note: this is equivalent code:
+
+```{r eval = FALSE}
+Slim_Movies <- 
+  Movies %>% select(., title, budget, length)
+```
+
+
+## Smaller data sets
+
+Often it is useful to work with a smaller subset of the data until we get our 
+analysis methods figured out, and then to move to the full data.  This makes mistakes
+happen more quickly ;-)
+
+### Heads or Tails?
+
+```{r, head-tail }
+Slim_Movies %>% head(3)       # first few rows
+Slim_Movies %>% tail(3)       # last few rows
+```
+
+### Random sample
+
+```{r, random }
+Slim_Movies %>% sample_n(3)          # 3 random rows
+Slim_Movies %>% sample_frac(.00007)  # random fraction of rows
+```
+
+
+## filter() 
+
+#### Exercise
+
+Let's use only use movies (cases) that have budget information and have shorter titles.
+
+```{r, filter-budget }
+Slim_Movies <- 
+  Slim_Movies %>% 
+  filter(!is.na(budget), nchar(title) < 24)
+```
+
+
+## Creating new variables
+
+#### Exercise
+
+Use `mutate()` or `transmute()` to create a new variable.  How do the two differ?
+
+
+```{r, mutate }
+Slim_Movies %>% 
+  mutate(dpm = budget/length) %>%   # try transmute() here, too
+  head(6)
+```
+
+
+## One-row summaries with summarise()
+
+Note: `summarize()` works for non New Zealanders, but it conflicts with a function with
+that same name in another package.
+
+```{r, summarise }
+# number of movies (cases) in movie data
+Movies %>% summarise(n())
+```
+
+
+```{r, summarise-2 }
+# mean and total number of minutes of all the movies
+Movies %>% 
+  summarise(
+    mean_length  = mean(length, na.rm = TRUE), 
+    total_length =  sum(length, na.rm = TRUE)
+    )
+```
+
+
+## group_by()
+
+`group_by()` is what makes this system really hum.
+
+
+```{r, group-by }
+# mean length of movies in hours for all the movies, broken down by mpaa
+Movies %>% 
+  mutate(hours = length/60) %>% 
+  group_by(mpaa) %>% 
+  summarise(mean(hours, na.rm = TRUE))
+```
+
+
+## arrange() reorders the cases
+
+```{r, arrange }
+# average length in hours, by mpaa rating, sorted by average length
+Movies %>% 
+  group_by(mpaa) %>% 
+  mutate(hours = length/60) %>% 
+  summarise(avg_length = mean(hours, na.rm = TRUE)) %>% 
+  arrange(avg_length)
+```
+
+
+## Your Turn 
+
+### A Smaller Data Set
+
+When starting, it can be helpful to work with a small subset of the data.  When you have your data wrangling statements in working order, shift to the entire data table.
+
+```{r, small-subset }
+RecentMovies <-
+  Movies %>%
+  filter(year > 2000) %>%
+  filter(mpaa != "") 
+```
+
+
+You can use the smaller data set as you are figuring out the solutions to these 
+exercises.  Once have it sussed, you can switch to the full `Movies` data.
+
+### Exercises
+
+#### What is the average IMDB user rating?
+
+```{r, rating, eval = FALSE }
+RecentMovies %>%
+  summarise(avg = ????(rating)) 
+```
+
+
+#### What is the average IMDB user rating of movies for each mpaa category?
+
+```{r, rating-by-cat, eval = FALSE }
+RecentMovies %>% 
+  group_by(????) %>% 
+  summarise(avg = ????(rating))
+```
+
+#### How many Action Movies in each year?
+
+```{r, action-movies, eval = FALSE }
+RecentMovies %>%
+  group_by(????) %>%
+  summarise(Actioncount = sum(????))
+```
+
+#### How many Comedies of each mpaa rating in each year?
+
+```{r, comedies, eval = FALSE }
+RecentMovies %>%
+  group_by(????, ????) %>%
+  summarise(????)
+```
+
+
+
+#### plot the average IMDB ratings for movies with mpaa "R" over the years.
+
+```{r r-movies, eval = FALSE }
+RMovies <-
+  Movies %>%
+  filter(mpaa == "R") %>%     # just the rated R movies
+  group_by(year) %>%          # for each year 
+  summarise(mean_user_rating = ????)
+
+ggplot(RMovies, aes(x = ????, y = ????)) + geom_????()
+```
+
+
+####  same plot with all mpaa ratings over the years.
+
+Note that I'm not actually keeping the dataframe anymore:
+```{r eval = FALSE }
+Movies %>%
+  group_by(????, ????) %>%          # for each year  and rating
+  summarise(mean_user_rating = ????) %>%
+  ggplot(aes(x = ????, y = ????, color = ????)) + geom_????()
+```
+
+
