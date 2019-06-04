@@ -92,33 +92,27 @@ names(NHANES) <- tolower(names(NHANES))
 
 - No exceptions.
 
+## Not Tidy
+
+<center>
+<img width='1000' src='images/militarypay.png' />
+</center>
+
 ## Chaining 
 
 The pipe syntax (%>%) takes a data frame (or data table) and sends it to the argument of a function.  
-
 
 - x %>% f(y) is the same as f(x, y)
 
 - y %>% f(x, ., z) is the same as f(x,y,z)
 
 
-## Building Tidy Data
-
-- object_name = function_name(arguments) 
-- object_name = data_table %>% function_name(arguments) 
-- object_name = data_table %>%  
-  &nbsp; &nbsp; &nbsp;    &nbsp; &nbsp; &nbsp; function_name(arguments) %>%  
-  &nbsp; &nbsp; &nbsp;     &nbsp; &nbsp; &nbsp; function_name(arguments)
-
-- in chaining, the value (on left) %>% is **first argument** to the function (on right)
-
-
 ## 5 Main Data Verbs
 
 Data verbs take data tables as input and give data tables as output
 
-1. select(): removes unwanted *variables* (and rename() )
-2. filter():  removes/subsets unwanted *cases*
+1. select(): keeps *variables* of interest (and rename() ), i.e., columns
+2. filter():  subsets *cases* of interest, i.e., rows
 3. mutate(): transforms the variable (and transmute() like mutate, returns only new variables)
 4. arrange(): reorders the cases
 5. summarize(): computes summary statistics
@@ -170,7 +164,7 @@ Babynames %>% sample_n(size=5)
 names(NHANES)
 ```
 
-## 1. select(): removes unwanted *variables*
+## 1. select(): keeps *variables*
 
 
 find the sleep variables
@@ -183,7 +177,7 @@ names(NHANESsleep)
 dim(NHANESsleep)
 ```
 
-## 2. filter():  removes/subsets unwanted *cases* 
+## 2. filter():  keeps *cases* 
 
 subset for college students
 
@@ -264,7 +258,7 @@ NHANES %>% mutate(weightlb = weight*2.2) %>%
 
 
 
-# ggplot2 (the packages), ggplot (the function)
+# ggplot2 (the package) &  ggplot (the function)
 
 ## goals
 
