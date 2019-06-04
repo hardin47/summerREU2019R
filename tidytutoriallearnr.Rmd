@@ -12,8 +12,7 @@ knitr::opts_chunk$set(
   echo = TRUE, tidy = FALSE, size = "small",
   fig.width = 8, fig.height = 6)
 
-require(mosaic)
-require(ggformula)
+require(tidyverse)
 require(ggplot2movies)  # gets us movies dataset
 
 Movies <- movies
@@ -106,7 +105,7 @@ Data verbs take data tables as input and give data tables as output
 The `Movies` data set contains information about movies.
 
 ```{r, inspect, exercise = TRUE}
-inspect(Movies)
+glimpse(Movies)
 ```
 
 

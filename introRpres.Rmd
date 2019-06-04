@@ -10,14 +10,9 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, tidy = FALSE, size = "small", message=FALSE, warning=FALSE)
-require(dplyr)
-require(tidyr)
-require(ggplot2)
-require(babynames)
-require(googlesheets)
-require(nycflights13)
+require(tidyverse)
 require(NHANES)
-require(lattice)
+require(babynames)
 Babynames <- babynames
 names(NHANES) <- tolower(names(NHANES))
 ```
