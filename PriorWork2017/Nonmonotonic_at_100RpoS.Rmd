@@ -1,0 +1,259 @@
+---
+title: "Nonmonotonic at 100% RpoS"
+author: "Madison Hobbs"
+date: "7/22/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo =FALSE)
+knitr::opts_chunk$set(cache = TRUE) 
+knitr::opts_chunk$set(message = FALSE) 
+knitr::opts_chunk$set(warning = FALSE) 
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library("DESeq2")
+library(stringr)
+# read in table of all counts
+allCounts <- read.csv("DMS2670_LB_NC_000913.tsv", header = T, sep = "\t") 
+```
+```{r, echo=F, warning = F, message = F}
+#collect the geneids
+allCounts$GeneidBackup = allCounts$Geneid
+# note that the geneids here are really long and contain a lot of information. We are going to parse those out, and first...
+# make a separate column for gene feature (CDS, AS_CDS, IGR, etc). 
+allCounts <- allCounts %>% separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+allCounts <- allCounts %>% select(Geneid, feature,                                           "0.00_A" = A0, # relabel the columns to reflect RpoS level, not arabinose
+         "0.00_B" = B0,
+         "0.00_C" = C0,
+         "0.35_A" = A10..5,
+         "0.35_B" = B10..5,
+         "0.35_C" = C10..5,
+        "11.59_A" = A5x10.5,
+         "11.59_B" = B5x10.5,
+        "11.59_C" = C5x10.5,
+        "20.40_A" = A10..4,
+        "20.40_B" = B10..4,
+        "20.40_C" = C10..4,
+        "48.37_A" = A10..3,
+        "48.37_B" = B10..3,
+        "48.37_C" = C10..3,
+       "100.00_A" = A2537,
+       "100.00_B" = B2537,
+       "100.00_C" = C2537,
+       "129.96_A" = A2x10..3,
+       "129.96_B" = B2x10..3,
+       "129.96_C" = C2x10..3,
+       "190.38_A" = A5x10..3,
+       "190.38_B" = B5x10..3,
+       "190.38_C" = C5x10..3)
+```
+```{r}
+# Now, we must extract the genenames from each Geneid. However, each feature has a slightly different pattern, and we will need to do the features separately. 
+
+# IGR's (this includes AS_IGRSs): 
+# IGR stands for intergenic region which means a region between coding sequences or different types of RNA. Therefore, we'll have a start.bnum and end.bnum as well as a start.genename and end.genename. Note that not all genes will have a bnum (only CDS/AS_CDS do)
+bnum = "b[0-9]{4}" # what do bnumbers look like?
+genename = ",[a-z]{3}[A-Z,]." # what does a genename look like? this is regexp lingo
+rna.name = ",rna[0-9].." # what does an RNA name look like?
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid # store the Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]") # separate the first part of the Geneid which talks about the IGR's start gene (Geneid1) and the last part of the IGR Geneid which talks about that IGR's end gene (Geneid2). 
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1 #start feature
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when( #start gene name: many possibilities!
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename), #if the start feature was CDS, then the name is going to be genename style, so we extract a genename-type thing from Geneid1
+    TRUE ~ str_extract(igr$Geneid1, rna.name)) #otherwise, it's going to have an RNA-style name, so we extract the rna.name from Geneid1
+igr$end.gene <- case_when( #end gene neame: similar to above!
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename), # if the end feature was CDS, then we're looking for a genename-type bit from Geneid2
+    TRUE ~ str_extract(igr$Geneid2, rna.name)) #otherwise, it must be an RNA-style label of some sort. 
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum), #bnums only exist for CDS, so we check if the feature is CDS before extracting a bnum from Geneid1
+    TRUE ~ "none") # if not CDS, then no bnum exists so we can put "none"
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum), #same thing as above but for end bnum
+    TRUE ~ "none")
+# now get rid of all those pesky commas that got into our start.gene labels. I could have not included the punctuation in my regex pattern, but then str_extract() might have gotten confused with a less specific pattern
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% select(-comma)
+allCounts <- full_join(igr, allCounts) #add this new information to allCounts!
+```
+```{r, echo=F, warning = F, message = F}
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.." #new genename pattern
+#bnum pattern stays the same
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename) #extract those genenames!
+cds$bnum <- str_extract(cds$Geneid, bnum) # extract them bnums!
+#get rid of the pesky colon that was part of the pattern
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, cds) #add the new info to allCounts
+```
+```{r, echo=F, warning = F, message = F}
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].." #new rna.name pattern
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA"))
+rna$genename <- str_extract(rna$Geneid, rna.name) #record those rna.names
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon) #get rid of colon
+allCounts <- full_join(allCounts, rna) #update allCounts with ncRNA names!
+
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA"))
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name) #same rna.name pattern exists as above, so extract those rna.names! And store the result as genename - I know. This is just for convenience's sake so we have a common column to refer to when we want the short hand name for a gene. 
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon) #get rid of that colon
+allCounts <- full_join(allCounts, rRNA) #update allCounts
+
+#tRNA -- analogous to rRNA above. 
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA"))
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+
+# remove the NA rows we just created by full_joining while adding the ncRNA, rRNA, tRNA genenames
+allCounts <- filter(allCounts, feature %in% c("IGR", "AS_IGR") | genename != "NA")
+
+# make tidy data
+countsTable.all.tidy <- allCounts %>%
+  gather(cond.samps, rawCount, -Geneid, -feature, -genename, -bnum, -Geneid1, -Geneid2, -feature1, -feature2, -start.gene, -end.gene, -start.bnum, - end.bnum)
+```
+
+# Genes Whose Expression Pattern Differs at Wild Type (rssB present)
+We ask what genes are differentially expressed betwen 48.37% and 100% as well as 100% and 129.96%. Of these, we want to know which go down at 100% but back up again at 129.96% as well as which go up at 100% but down again at 129.96%. These are genes whose expression pattern appears differnt at rssB's presence. However, monotonicity is a struggle througout the data set, and non-monotonicity at 100% may not be indicative of anything interesting going on. 
+
+We take the genes that are differentially expressed across 48.37% and 100% as well as between 100% and 129.96%, adjusting for the two comparisons using the Bonferroni adjustment. Of these, we find the over 1000 genes which are not monotonic across these three levels and write them up to a table.
+
+Note that whether or not these genes are regulated by RpoS, they may be influenced by the presence of RpoS; this confounding variable keeps us from infering causality regarding the rssB deletion. 
+
+100% vs 129.96% : 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#100% vs 129.96%
+countsTable_100_129.96 <- allCounts %>%
+  select(Geneid, genename, `100.00_A`, `129.96_A`,`100.00_B`, `129.96_B`, `100.00_C`, `129.96_C`)
+
+# define conditions
+condition_100_129.96 <- as.factor(c("100.00", "129.96","100.00", "129.96", "100.00", "129.96"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable_100_129.96)) %>%
+  filter(endsWith(colnames(countsTable_100_129.96), "A") 
+         | endsWith(colnames(countsTable_100_129.96), "B") 
+         | endsWith(colnames(countsTable_100_129.96),"C"))
+coldata_100_129.96 <- data.frame(row.names = colnames(countsTable_100_129.96)[3:8], condition_100_129.96)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_100_129.96 <- countsTable_100_129.96 %>%
+  select(`100.00_A`, `129.96_A`,`100.00_B`, `129.96_B`, `100.00_C`, `129.96_C`)
+rownames(countsRaw_100_129.96) = countsTable_100_129.96$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_100_129.96 <- DESeqDataSetFromMatrix(countData = countsRaw_100_129.96, colData = coldata_100_129.96, design = ~condition_100_129.96)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_100_129.96 <- DESeq(cds_100_129.96)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_100_129.96 <- results(cds_100_129.96, alpha = 0.1/2)#bonferroni: two comparisions, 100% vs 129.96% and 48.37% vs 100%
+summary(results_100_129.96)
+```
+```{r, echo=FALSE, message=F}
+DE.100.129.genes <- data.frame(padj.100.129.96 = results_100_129.96$padj, feature = allCounts$feature, genename = allCounts$genename, start.gene = allCounts$start.gene, end.gene = allCounts$end.gene, Geneid = allCounts$Geneid)
+
+DE.100.129.genes <- DE.100.129.genes %>%
+  mutate(slope.100.129.96 = case_when(results_100_129.96$log2FoldChange > 0 ~ "positive", 
+                                      TRUE ~ "negative")) %>%
+  filter(padj.100.129.96 < 0.1/2) #bonferroni with confidence level of 0.1
+```
+
+48.37% vs 100% :
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#48.37% vs 100%
+countsTable_48.37_100 <- allCounts %>%
+  select(Geneid, genename, `48.37_A`, `100.00_A`,`48.37_B`, `100.00_B`, `48.37_C`, `100.00_C`)
+
+# define conditions
+condition_48.37_100 <- as.factor(c("48.37", "100.00","48.37", "100.00", "48.37", "100.00"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable_48.37_100)) %>%
+  filter(endsWith(colnames(countsTable_48.37_100), "A") 
+         | endsWith(colnames(countsTable_48.37_100), "B") 
+         | endsWith(colnames(countsTable_48.37_100),"C"))
+coldata_48.37_100 <- data.frame(row.names = colnames(countsTable_48.37_100)[3:8], condition_48.37_100)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_48.37_100 <- countsTable_48.37_100 %>%
+  select(`48.37_A`, `100.00_A`,`48.37_B`, `100.00_B`, `48.37_C`, `100.00_C`)
+rownames(countsRaw_48.37_100) = countsTable_48.37_100$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_48.37_100 <- DESeqDataSetFromMatrix(countData = countsRaw_48.37_100, colData = coldata_48.37_100, design = ~condition_48.37_100)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_48.37_100 <- DESeq(cds_48.37_100)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_48.37_100 <- results(cds_48.37_100, alpha = 0.1/2) #bonferroni
+summary(results_48.37_100)
+```
+```{r, echo=FALSE, message=F}
+DE.48.100.genes <- data.frame(padj.48.100 = results_48.37_100$padj, feature = allCounts$feature, genename = allCounts$genename, start.gene = allCounts$start.gene, end.gene = allCounts$end.gene, Geneid = allCounts$Geneid)
+DE.48.100.genes <- DE.48.100.genes %>%
+  mutate(slope.48.100 = case_when(results_48.37_100$log2FoldChange > 0 ~ "positive", 
+                                      TRUE ~ "negative")) %>%
+  filter(padj.48.100 < 0.1/2) #bonferroni
+```
+```{r, echo=F, message=F}
+# make a table of those genes
+nonmonotonic.at.100 <- inner_join(DE.100.129.genes, DE.48.100.genes)
+```
+```{r, echo=F, message=F}
+# get normalized counts and DESeq across all groups
+countsTable.nonmonotonic <- allCounts %>%
+  select(`48.37_A`, `48.37_B`, `48.37_C`, `100.00_A`, `100.00_B`, `100.00_C`, `129.96_A`, `129.96_B`, `129.96_C`)
+# define conditions
+condition.nonmonotonic <- as.factor(c("48.37", "48.37", "48.37", "100.00", "100.00", "100.00", "129.96", "129.96", "129.96"))
+coldata.nonmonotonic <- as.data.frame(row.names =  colnames(countsTable.nonmonotonic), condition.nonmonotonic)
+cds.nonmonotonic <- DESeqDataSetFromMatrix(countData = countsTable.nonmonotonic, colData = coldata.nonmonotonic, design = ~condition.nonmonotonic)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.nonmonotonic <- DESeq(cds.nonmonotonic)
+#cds.all <- estimateSizeFactors(cds.all, locfunc = genefilter::shorth)
+#cds.all <- estimateDispersions(cds.all)
+#cds.all <- nbinomWaldTest(cds.all)
+results.nonmonotonic <- results(cds.nonmonotonic)
+```
+```{r, echo=F, message=F}
+normCounts.nonmonotonic <- as.data.frame(counts(cds.nonmonotonic, normalized = TRUE)) %>%
+  mutate(genename = allCounts$genename, Geneid = allCounts$Geneid)
+
+nonmonotonic.at.100 <- left_join(nonmonotonic.at.100, normCounts.nonmonotonic, by = c("Geneid", "genename")) 
+```
+```{r, echo=F, message=F, warning=F}
+#plot the genes that are nonmonotonic by rssB
+nonmonotonic.tidy <- nonmonotonic.at.100 %>%
+  gather(cond.samp, normCount, `48.37_A`:`129.96_C`) %>%
+  separate(cond.samp, c("RpoS%", "sample"), sep = "[_]") %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)/100) %>%
+  arrange(Geneid) %>%
+  group_by(Geneid, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(Geneid) %>%
+  mutate(scaler = levelMean[4],
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler, 
+         nonmonotonic = case_when(levelMean[1] > levelMean[4] & levelMean[7] > levelMean[4] ~ TRUE,
+                                levelMean[1] < levelMean[4] & levelMean[7] < levelMean[4] ~ TRUE,
+                                TRUE ~ FALSE)) %>%
+  ungroup() %>%
+  filter(nonmonotonic) %>% #save only the genes that whose slope is not monotonic across 48%, 100%, and 129% 
+  select(-nonmonotonic) 
+nonmonotonic.at.100 <- filter(nonmonotonic.at.100, Geneid %in% nonmonotonic.tidy$Geneid) #update wide data frame
+  
+write.table(nonmonotonic.at.100, "Nonmonotonic.at.100%RpoS.txt", sep="\t")
+
+ggplot(data = nonmonotonic.tidy, aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = nonmonotonic.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + ggtitle(paste(length(nonmonotonic.at.100$Geneid), "genes whose expression changes significantly (FDRp < 0.05/2) at 100% RpoS")) + theme(legend.position = "none")
+```
+
+We see the plot above where genes which are differentially expressed between 48.37% and 100% as well as between 100% and 129.96% and which are not monotonic at across the three levels. 

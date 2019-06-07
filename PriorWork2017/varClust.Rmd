@@ -1,0 +1,673 @@
+---
+title: "Variability in Clusters"
+author: "Jo Hardin"
+date: "7/2/2018"
+output: pdf_document
+---
+## Goal
+
+The goal of the series of experiments is to assess the variability of the clusters.  Both in terms of re-sampling from the data set as well as using a probability model to find an SE.
+
+Up first is R-code (credit: Madison Hobbs) which imports the data, normalizes, connects genes, etc.
+
+####  Dan's goal 
+
+is to show that the amount of RpoS affects the preferential binding.  If we delete a different transcription factor, would that change the shape of the averages?
+
+
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      fig.width = 30, fig.height = 10, dev = "jpeg", 
+                      fig.align = 'center', fig.keep="all", fig.path = "UCLApics/", 
+                      dpi = 500, 
+                      cache = TRUE, message = FALSE, warning = FALSE) 
+
+skimr::skim_with(integer = list(hist = NULL, missing=NULL, complete = NULL)) 
+
+library(corrr)
+library(tidyverse)
+library(stringr)
+library(cluster)
+library("DESeq2")
+library(amap)
+library(mclust)
+
+
+source("rpoSnorm.R")
+source("rpoScount.R")
+source("rpoSclust.R")
+source("rpoSDEclust.R")
+source("rpoScorr.R")
+source("rpoSDE.R")
+source("rpoSboot.R")
+
+sessionInfo()
+```
+
+
+# Variability
+
+
+## 1. Sample variability
+
+One of the things Madison did was to calculate ARI from the deep vs deep with 3 of the "bad" samples removed.  As a first pass at understanding how things change will be to remove ranodm samples.  If we remove 3 random samples, how will the ARI compare to the ARI that Madison found.
+
+Working with the deep data only (at first?).
+
+We remove the samples with 100% RpoS (100.00_A, 100.00_B, 100.00_C) because they have a different strain of E. coli than the rest of the samples.  We also removed the samples with much lower median read count (0.00_B, 0.35_B, and 20.40_A).
+
+Q:  how different is it to remove the *low* count samples vs any random 3 samples.
+
+
+### Deep Data, all samples except 100% RpoS
+
+Cluster genes that (1) have at least raw count of 50, and (2) are DE across conditions. 
+
+```{r eval = FALSE}
+norm.samps <- c("0.00_A", "0.00_C", "0.35_A", "0.35_C", 
+                "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B",  
+                "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+                "190.38_A", "190.38_B", "190.38_C")
+
+norm.cond <- as.factor(c("0.00", "0.00", "0.35", "0.35", "11.59", "11.59", "11.59", 
+                          "20.40", "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", 
+                          "129.96", "190.38", "190.38", "190.38"))
+
+dp.name <- c("DMS2670_LB_NC_000913_deeper.tsv")
+
+allsamp <- fullDEclust(filename = dp.name, norm.samps, norm.cond, siglevel = 0.001, 
+                       nclust = numberclusters, countcutoff = 50)
+
+date()
+rand3samp <- list()
+
+for(i in 1:100){
+  set.seed(i)
+  rand3 <- sample(1:18, 3, replace=FALSE)
+  rand3samp[[i]] <- fullDEclust(filename = dp.name, norm.samps[-rand3], norm.cond[-rand3], 
+                                siglevel = 0.001, nclust = numberclusters, countcutoff = 50)
+}
+date()
+
+```
+
+```{r eval=FALSE}
+#k = 6
+#show medoids alone
+ggplot(data = allsamp$medoids.k, aes(x = RpoS, y = normCountScaled)) + 
+  geom_point() + geom_line(aes(y = meanScaled), size = 2) + 
+  coord_cartesian(ylim = c(0,2.3)) + facet_grid(. ~ cluster) + 
+  ggtitle("PAM medoids, k=6")+ ylab("Gene Expression")
+
+ggplot(data = rand3samp[[1]]$medoids.k, aes(x = RpoS, y = normCountScaled)) + 
+  geom_point() + geom_line(aes(y = meanScaled), size = 2) + 
+  coord_cartesian(ylim = c(0,2.3)) + facet_grid(. ~ cluster) + 
+  ggtitle("PAM medoids, k=6, 1st Rand")+ ylab("Gene Expression")
+
+ggplot(data = rand3samp[[2]]$medoids.k, aes(x = RpoS, y = normCountScaled)) + 
+  geom_point() + geom_line(aes(y = meanScaled), size = 2) + 
+  coord_cartesian(ylim = c(0,2.3)) + facet_grid(. ~ cluster) + 
+  ggtitle("PAM medoids, k=6, 2nd Rand")+ ylab("Gene Expression")
+
+ggplot(data = rand3samp[[3]]$medoids.k, aes(x = RpoS, y = normCountScaled)) + 
+  geom_point() + geom_line(aes(y = meanScaled), size = 2) + 
+  coord_cartesian(ylim = c(0,2.3)) + facet_grid(. ~ cluster) + 
+  ggtitle("PAM medoids, k=6, 3rd Rand")+ ylab("Gene Expression")
+
+```
+
+```{r eval=FALSE}
+# k = 6, show genes with medoids
+ggplot(data = allsamp$countclust, aes(x = RpoS, y = normCountScaled, group = Geneid)) + 
+  geom_point(color="blue", alpha = 0.05) + coord_cartesian(ylim = c(0,2.3)) + 
+  facet_grid(. ~ cluster) +
+  geom_line(aes(y = meanScaled), linetype = "dashed", color="blue", size=.1) + 
+  ggtitle("Gene Expression Clustering, PAM k=6; Medoids Overlaid in black") + 
+  ylab("Gene Expression") + 
+  geom_line(data = allsamp$medoids.k, aes(y = meanScaled), col = "black", size = 1.5) + 
+  geom_point(data = allsamp$medoids.k, col = "black") +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+
+
+
+
+## How Similar are the two Deep  Clusterings?
+ARI: Deep (0.00_B, 0.35_B, 20.40_A removed) vs. Deep (0.00_B, 0.35_B, 20.40_A included)
+
+```{r eval=FALSE}
+medoids.compare <- inner_join(deep.regulated.tidy, extra.deep.regulated.tidy,
+                              by = c("Geneid", "feature", "Geneid1", "Geneid2", "feature1", "feature2", "start.gene", "end.gene", "start.bnum", "end.bnum", "genename", "bnum", "RpoS%", "replicate")) 
+
+round(adjustedRandIndex(medoids.compare$`pam$clustering.x`, medoids.compare$`pam$clustering.y`),3)
+```
+
+The clusterings for the deep data with and without 0.00_B, 0.35_B, and 20.40_A are more similar than the deep vs. shallow, but certainly don't agree wholeheartedly either. 
+
+
+
+### Deep Data, 0.00_C, 0.35_C, 20.40_C and 100% RpoS removed
+(chose 3 different samples, arbitrarily)
+
+We remove the samples with 100% RpoS and 0.00_C, 0.35_C, 20.40_C.
+
+
+
+
+
+
+
+
+
+
+## How Similar are the two Deep  Clusterings?
+ARI: Deep (0.00_B, 0.35_B, 20.40_A removed) vs. Deep (0.00_B, 0.35_B, 20.40_A included)
+
+```{r eval=FALSE}
+medoids.compare <- inner_join(deep.regulated.tidy, extra.deep.regulated.tidy,
+                              by = c("Geneid", "feature", "Geneid1", "Geneid2", "feature1", "feature2", "start.gene", "end.gene", "start.bnum", "end.bnum", "genename", "bnum", "RpoS%", "replicate")) 
+
+round(adjustedRandIndex(medoids.compare$`pam$clustering.x`, medoids.compare$`pam$clustering.y`),3)
+```
+
+The clusterings for the deep data with and without 0.00_B, 0.35_B, and 20.40_A are more similar than the deep vs. shallow, but certainly don't agree wholeheartedly either. 
+
+
+####  new 3 vs. original 3
+
+```{r eval=FALSE}
+medoids.compare <- inner_join(deep.regulated.tidy.new3, extra.deep.regulated.tidy,
+                              by = c("Geneid", "feature", "Geneid1", "Geneid2", "feature1", "feature2", "start.gene", "end.gene", "start.bnum", "end.bnum", "genename", "bnum", "RpoS%", "replicate")) 
+
+round(adjustedRandIndex(medoids.compare$`pam$clustering.x`, medoids.compare$`pam$clustering.y`),3)
+```
+
+
+####  new 3 vs. full data
+
+```{r eval=FALSE}
+medoids.compare <- inner_join(deep.regulated.tidy.new3, deep.regulated.tidy,
+                              by = c("Geneid", "feature", "Geneid1", "Geneid2", "feature1", "feature2", "start.gene", "end.gene", "start.bnum", "end.bnum", "genename", "bnum", "RpoS%", "replicate")) 
+
+round(adjustedRandIndex(medoids.compare$`pam$clustering.x`, medoids.compare$`pam$clustering.y`),3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### 2. Variability across deep & shallow.
+
+a.  correlate genes across deep and shallow.  how does the sequencing depth affect those correlations?  Are they within the SE that would be expected?
+
+b.  What if we did something like a t-test?  would the same genes come up as significant in the deep and shallow if we were just doing t-test across no rPos vs. some.  (although we don't have a control value, 100% doesn't give us a control)
+
+my notes talk about CRBD...  maybe there is something about dependence?  like a paired t-test?
+
+c.  Somehow (ARI??) measure the variability of the clusters.  DESeq and the Negative Binomial may give us a way to think about the variability of some of the measures.
+
+###  3. Simulation
+
+* simulate 1/10th of the deep data repeatedly
+* does it "look" like the shallow data?  what does it mean to look similar?
+* use a parametric bootstrap w the multinomial.
+
+
+```{r}
+norm.samps <- c("0.00_A", "0.00_C", "0.35_A", "0.35_C", 
+                "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B",  
+                "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+                "190.38_A", "190.38_B", "190.38_C")
+
+#norm.cond <- as.character(c("0.00", "0.00", "0.35", "0.35", "11.59", "11.59", "11.59", 
+#                          "20.40", "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", 
+#                          "129.96", "190.38", "190.38", "190.38"))
+norm.cond <- as.character(c("0.00", "0.00", "0.00", "0.00", "11.59", "11.59", "11.59", 
+                          "20.40", "20.40", "48.37", "48.37", "48.37", "160", "160", 
+                          "160", "160", "160", "160"))
+
+
+dp.name <- c("DMS2670_LB_NC_000913_deeper.tsv")
+
+set.seed(4747)
+countdata <- countfunc(filename = dp.name, norm.samps, norm.cond, countcutoff = 50)
+
+#  filter here to includ only CDS, IGR, and ncRNA (and antisense)
+#  (no rRNA or tRNA)
+countdata$counts <- countdata$counts %>%
+  dplyr::filter(feature %in% c("CDS", "AS_CDS", "IGR", "AS_IGR", "ncRNA", "AS_ncRNA"))
+countdata$countsT <- countdata$countsT %>%
+  dplyr::filter(feature %in% c("CDS", "AS_CDS", "IGR", "AS_IGR", "ncRNA", "AS_ncRNA"))
+
+DE.info <- DEfunc(allCounts = countdata$counts, DE.samps = norm.samps, DE.cond = norm.cond)
+
+```
+
+
+
+```{r}
+## Parametric bootstrap using negative binomial
+## Analysis includes DE & Clustering (note:  DE will force different number of genes in each set)
+
+##  Also, we do the DE & Clustering for the original data
+
+date()
+reps<- 100
+numberclusters <- 5
+clustNBBS<- list()
+
+for(i in 1:reps){
+  set.seed(i)
+  newCounts <- parBS(dds = DE.info, allCounts = countdata$counts, norm.samps, norm.cond)
+  clustNBBS[[i]] <- fullDEclust(newCounts$counts, norm.samps, norm.cond, siglevel = 0.01, 
+                       nclust = numberclusters)
+}
+date()
+
+NBoutput <- clustNBBS
+
+set.seed(47)
+dp.allCounts <- countfunc(filename = dp.name, norm.samps, norm.cond, countcutoff = 50)
+dp.allsamp <- fullDEclust(dp.allCounts$counts, norm.samps, norm.cond, siglevel = 0.01, 
+                       nclust = numberclusters) 
+```
+
+
+
+```{r}
+## Using the information from the medoids, we correlate which
+## of the original medoids correlates most closely with the new medoids
+
+dp.allsamp$medoids.k <- dp.allsamp$medoids.k %>%
+  dplyr::mutate(maxcluster = cluster)
+
+by_cluster_orig <- dp.allsamp$medoids.k%>%
+  dplyr::select(cluster, cond.samps, norm.cond, normCountScaled) %>%
+  dplyr::mutate(norm.cond = parse_number(norm.cond)) %>%
+  tidyr::spread(key=cluster, value=normCountScaled) %>%
+  dplyr::arrange(norm.cond) %>%
+  dplyr::select(-cond.samps, -norm.cond) 
+
+for(i in 1:reps){  
+temp <- clustNBBS[[i]]$medoids.k %>% 
+  dplyr::select(cluster, normCountScaled) %>%
+  dplyr::group_by(cluster) %>% dplyr::do(
+    dplyr::select(., -cluster) %>% 
+      correlate2(y=by_cluster_orig, use="pairwise.complete.obs", method="spearman")) %>%
+# note: need the package corrr to make correlate2 work
+  dplyr::top_n(1, rowname) %>% dplyr::select(-rowname) %>%
+  dplyr::mutate(maxcor = purrr::pmap_dbl(list(`1`, `2`, `3`, `4`, `5`), max)) %>%
+  dplyr::mutate(maxclust = ifelse(`1` >= maxcor, 1, 
+                                  ifelse(`2` >= maxcor, 2,
+                                         ifelse(`3` >= maxcor, 3,
+                                                ifelse(`4` >= maxcor, 4, 5)))))
+#                                                ifelse(`4` >= maxcor, 4,
+#                                                       ifelse(`5` >= maxcor, 5, 6))))))
+
+clustNBBS[[i]]$medoids.k <- clustNBBS[[i]]$medoids.k %>%
+  dplyr::left_join(temp, by="cluster")
+}  
+
+
+```
+
+
+```{r}
+# Looking at the actual clusterings, we compute (1) ARI with the original, and (2) number
+# of genes used in each analysis
+
+numclustgenes <- data.frame()
+
+origgenes <- dp.allsamp$countclust %>%
+  dplyr::group_by(Geneid) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(origclust = cluster, Geneid)
+  
+for(i in 1:reps){
+
+temp47 <- clustNBBS[[i]]$countclust %>%
+  dplyr::group_by(Geneid) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::inner_join(origgenes, by = "Geneid")
+  
+    
+  numclustgenes[i,1] <- i
+  numclustgenes[i,2] <- clustNBBS[[i]]$countclust %>%
+    summarize(numDE = n_distinct(Geneid))
+  numclustgenes[i,3] <- mclust::adjustedRandIndex(temp47$cluster, temp47$origclust)
+}
+
+names(numclustgenes) <- list("repnum2", "numDE", "ARI")
+
+#numclustgenes %>%
+#  dplyr::select(numDE) %>% skimr::skim()
+
+```
+
+
+There are `r nrow(dp.allCounts$counts)` genes above the 50 count threshold.   The number of genes used in each replicate (above 50 and also DE) are summarized as: 
+
+```{r}
+skimr::skim_with(integer = list(hist = NULL, missing=NULL, complete = NULL)) 
+
+numclustgenes %>% dplyr::select(numDE) %>% skimr::skim()
+```
+
+
+```{r}
+
+#  plotting the new medoid profiles in the same facet as the original
+#  medoid profile to which it is most highly correlated
+
+tempclust <- clustNBBS
+numberrows = numberclusters * length(unique(norm.cond))
+tempclust2 <- data.frame(matrix(NA, ncol=1, nrow=numberrows))[-1]
+
+for (i in 1:reps){
+  tempclust[[i]]$medoids.k <- tempclust[[i]]$medoids.k %>%
+    dplyr::group_by(cluster, RpoS) %>%
+    dplyr::sample_n(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(clus_max_val = paste(cluster, maxclust, meanScaled, levelMean, Geneid, sep="@")) %>%
+    dplyr::rename_at(dplyr::vars(names(tempclust[[i]]$medoids.k), "clus_max_val"),
+                     ~paste(c(names(tempclust[[i]]$medoids.k), "clus_max_val"),i,sep="."))
+  tempclust2 <- cbind.data.frame(tempclust2, tempclust[[i]]$medoids.k, stringsAsFactors = FALSE)
+}
+
+
+tempclust3 <- tempclust2 %>%
+  dplyr::select(dplyr::starts_with("clus_max_val"), RpoS.1) %>%
+  dplyr::rename(RpoS = RpoS.1) %>%
+  tidyr::gather(repnum, value, -RpoS) %>%
+  tidyr::separate(repnum, into = c("varname", "repnum2"), sep = "\\.") %>%
+  tidyr::separate(value, into = c("cluster", "maxcluster", "meanScaled", "levelMean", "Geneid"), sep = "@") %>%
+  dplyr::mutate(meanScaled = readr::parse_number(meanScaled)) %>%
+  dplyr::select(-varname)
+
+# the number of profiles that correlate to each of the original medoids
+# table(tempclust3$maxcluster)/length(unique(norm.cond))
+
+
+tempclust4 <- dp.allsamp$medoids.k %>%
+  dplyr::group_by(cluster, RpoS) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(repnum2 = 0) %>%
+  dplyr::select(RpoS, repnum2, cluster, maxcluster, meanScaled, levelMean, Geneid) %>%
+  rbind(tempclust3,.)
+
+ggplot(data = tempclust4, aes(x=RpoS, y = meanScaled, group = interaction(cluster, repnum2), color=repnum2)) +
+  geom_line() + theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0,5)) + facet_grid(. ~maxcluster) +
+  ggtitle("Neg Binom simulation of medoids, deep data") +
+  geom_line(data=tempclust4[tempclust4$repnum2 == 0,],
+                        aes(x = RpoS, y = meanScaled), color="black")
+
+```
+
+The number of new medoids that correlate to each of the original medoid profiles is `r table(tempclust3$maxcluster)/length(unique(norm.cond))`.
+
+###  Repeating for shallow data...
+
+```{r}
+norm.samps <- c("0.00_A", "0.00_C", "0.35_A", "0.35_C", 
+                "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B",  
+                "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+                "190.38_A", "190.38_B", "190.38_C")
+
+#norm.cond <- as.character(c("0.00", "0.00", "0.35", "0.35", "11.59", "11.59", "11.59", 
+#                          "20.40", "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", 
+#                          "129.96", "190.38", "190.38", "190.38"))
+norm.cond <- as.character(c("0.00", "0.00", "0.00", "0.00", "11.59", "11.59", "11.59", 
+                          "20.40", "20.40", "48.37", "48.37", "48.37", "160", "160", 
+                          "160", "160", "160", "160"))
+
+sh.name <- c("DMS2670_LB_NC_000913.tsv")
+
+set.seed(4747)
+sh.countdata <- countfunc(filename = sh.name, norm.samps, norm.cond, countcutoff = 5)
+
+#  add a filter here to includ only CDS, IGR, and ncRNA (and antisense)
+#  (no rRNA or tRNA)
+sh.countdata$counts <- sh.countdata$counts %>%
+  dplyr::filter(feature %in% c("CDS", "AS_CDS", "IGR", "AS_IGR", "ncRNA", "AS_ncRNA"))
+sh.countdata$countsT <- sh.countdata$countsT %>%
+  dplyr::filter(feature %in% c("CDS", "AS_CDS", "IGR", "AS_IGR", "ncRNA", "AS_ncRNA"))
+
+
+
+sh.DE.info <- DEfunc(allCounts = sh.countdata$counts, DE.samps = norm.samps, DE.cond = norm.cond)
+
+```
+
+
+
+```{r}
+## Parametric bootstrap using negative binomial
+## Analysis includes DE & Clustering (note:  DE will force different number of genes in each set)
+
+##  Also, we do the DE & Clustering for the original data
+
+
+date()
+sh.clustNBBS<- list()
+
+set.seed(474747)
+for(i in 1:reps){
+  set.seed(i)
+  sh.newCounts <- parBS(dds = sh.DE.info, allCounts = sh.countdata$counts, norm.samps, norm.cond)
+  sh.clustNBBS[[i]] <- fullDEclust(sh.newCounts$counts, norm.samps, norm.cond, siglevel = 0.01, 
+                       nclust = numberclusters)
+}
+date()
+
+sh.NBoutput <- sh.clustNBBS
+
+sh.allCounts <- countfunc(filename = sh.name, norm.samps, norm.cond, countcutoff = 5)
+sh.allsamp <- fullDEclust(sh.allCounts$counts, norm.samps, norm.cond, siglevel = 0.01, 
+                       nclust = numberclusters) 
+```
+
+
+```{r}
+## Using the information from the medoids, we correlate which
+## of the original medoids correlates most closely with the new medoids
+
+sh.allsamp$medoids.k <- sh.allsamp$medoids.k %>%
+  dplyr::mutate(maxcluster = cluster)
+
+sh.by_cluster_orig <- sh.allsamp$medoids.k%>%
+  dplyr::select(cluster, cond.samps, norm.cond, normCountScaled) %>%
+  dplyr::mutate(norm.cond = parse_number(norm.cond)) %>%
+  tidyr::spread(key=cluster, value=normCountScaled) %>%
+  dplyr::arrange(norm.cond) %>%
+  dplyr::select(-cond.samps, -norm.cond) 
+
+
+for(i in 1:reps){  
+sh.temp <- sh.clustNBBS[[i]]$medoids.k %>% 
+  dplyr::select(cluster, normCountScaled) %>%
+  dplyr::group_by(cluster) %>% dplyr::do(
+    dplyr::select(., -cluster) %>% 
+      correlate2(y=sh.by_cluster_orig, use="pairwise.complete.obs", method="spearman")) %>%
+# note: need the package corrr to make correlate2 work
+  dplyr::top_n(1, rowname) %>% dplyr::select(-rowname) %>%
+  dplyr::mutate(maxcor = purrr::pmap_dbl(list(`1`, `2`, `3`, `4`, `5`), max)) %>%
+  dplyr::mutate(maxclust = ifelse(`1` >= maxcor, 1, 
+                                  ifelse(`2` >= maxcor, 2,
+                                         ifelse(`3` >= maxcor, 3, 
+                                                ifelse(`4` >= maxcor, 4, 5)))))
+#                                                ifelse(`4` >= maxcor, 4,
+#                                                       ifelse(`5` >= maxcor, 5, 6))))))
+
+sh.clustNBBS[[i]]$medoids.k <- sh.clustNBBS[[i]]$medoids.k %>%
+  dplyr::left_join(sh.temp, by="cluster")
+}  
+
+```
+
+
+```{r}
+# Looking at the actual clusterings, we compute (1) ARI with the original, and (2) number
+# of genes used in each analysis
+
+sh.numclustgenes <- data.frame()
+
+sh.origgenes <- sh.allsamp$countclust %>%
+  dplyr::group_by(Geneid) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(origclust = cluster, Geneid)
+  
+for(i in 1:reps){
+
+sh.temp47 <- sh.clustNBBS[[i]]$countclust %>%
+  dplyr::group_by(Geneid) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::inner_join(sh.origgenes, by = "Geneid")
+  
+    
+  sh.numclustgenes[i,1] <- i
+  sh.numclustgenes[i,2] <- sh.clustNBBS[[i]]$countclust %>%
+    summarize(numDE = n_distinct(Geneid))
+  sh.numclustgenes[i,3] <- mclust::adjustedRandIndex(sh.temp47$cluster, sh.temp47$origclust)
+}
+
+names(sh.numclustgenes) <- list("repnum2", "numDE", "ARI")
+
+#sh.numclustgenes %>%
+#  dplyr::select(numDE) %>% skimr::skim()
+
+```
+
+
+There are `r nrow(sh.allCounts$counts)` genes above the 5 count threshold.   The number of genes used in each replicate (above 5 and also DE) are summarized as: 
+
+```{r}
+skimr::skim_with(integer = list(hist = NULL, missing=NULL, complete = NULL)) 
+
+sh.numclustgenes %>% dplyr::select(numDE) %>% skimr::skim()
+```
+
+
+
+```{r}
+#  plotting the new medoid profiles in the same facet as the original
+#  medoid profile to which it is most highly correlated
+
+
+sh.tempclust <- sh.clustNBBS
+numberrows = numberclusters * length(unique(norm.cond))
+sh.tempclust2 <- data.frame(matrix(NA, ncol=1, nrow=numberrows))[-1]
+
+for (i in 1:reps){
+  sh.tempclust[[i]]$medoids.k <- sh.tempclust[[i]]$medoids.k %>%
+    dplyr::group_by(cluster, RpoS) %>%
+    dplyr::sample_n(1) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(clus_max_val = paste(cluster, maxclust, meanScaled, levelMean, Geneid, sep="@")) %>%
+    dplyr::rename_at(dplyr::vars(names(sh.tempclust[[i]]$medoids.k), "clus_max_val"),
+                     ~paste(c(names(sh.tempclust[[i]]$medoids.k), "clus_max_val"),i,sep="."))
+  sh.tempclust2 <- cbind.data.frame(sh.tempclust2, sh.tempclust[[i]]$medoids.k, stringsAsFactors = FALSE)
+}
+
+
+sh.tempclust3 <- sh.tempclust2 %>%
+  dplyr::select(dplyr::starts_with("clus_max_val"), RpoS.1) %>%
+  dplyr::rename(RpoS = RpoS.1) %>%
+  tidyr::gather(repnum, value, -RpoS) %>%
+  tidyr::separate(repnum, into = c("varname", "repnum2"), sep = "\\.") %>%
+  tidyr::separate(value, into = c("cluster", "maxcluster", "meanScaled", "levelMean", "Geneid"), sep = "@") %>%
+  dplyr::mutate(meanScaled = readr::parse_number(meanScaled)) %>%
+  dplyr::select(-varname)
+
+# the number of profiles that correlate to each of the original medoids
+#table(sh.tempclust3$maxcluster)/length(unique(norm.cond))
+
+
+sh.allmeans <- sh.allsamp$countclust %>%
+  dplyr::group_by(Geneid, RpoS) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(Geneid, RpoS, orig.clust = cluster, orig.levelMean = levelMean, orig.meanScaled = meanScaled)
+
+sh.tempclust4 <- sh.allsamp$medoids.k %>%
+  dplyr::group_by(cluster, RpoS) %>%
+  dplyr::sample_n(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(repnum2 = 0) %>%
+  dplyr::select(RpoS, repnum2, cluster, maxcluster, meanScaled, levelMean, Geneid) %>%
+  rbind(sh.tempclust3,.) %>%
+  dplyr::left_join(sh.allmeans, by = c("Geneid", "RpoS"))
+
+###  GOAL:  use the data from the original dataset (not bootstrapped) to plot
+
+
+# the levelMean column is in the dataset, but it isn't helpful because the scale is too crazy.
+ggplot(data = sh.tempclust4, aes(x=RpoS, y = meanScaled, group = interaction(cluster, repnum2), color=repnum2)) +
+  geom_line() + theme(legend.position = "none") +
+  coord_cartesian(ylim = c(0,5)) + facet_grid(. ~maxcluster) +
+  ggtitle("Neg Binom simulation of medoids, shallow data") +
+  geom_line(data=sh.tempclust4[sh.tempclust4$repnum2 == 0,],
+                        aes(x = RpoS, y = meanScaled), color="black")
+
+```
+
+The number of new medoids that correlate to each of the original medoid profiles is `r table(sh.tempclust3$maxcluster)/length(unique(norm.cond))`.
+
+
+```{r}
+
+# ARI comparison of deep vs shallow
+
+sh.numclustgenes <- sh.numclustgenes %>%
+  dplyr::mutate(depth = "shallow")
+
+numclustgenes <- numclustgenes%>%
+  dplyr::mutate(depth = "deep")
+
+rbind(numclustgenes, sh.numclustgenes) %>%
+  ggplot(aes(x=depth, y=ARI)) + 
+  geom_boxplot()
+
+```

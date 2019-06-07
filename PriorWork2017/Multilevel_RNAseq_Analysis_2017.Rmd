@@ -1,0 +1,2041 @@
+---
+title: "Multilevel RNAseq Analysis"
+author: "Madison Hobbs"
+date: "6/12/2017"
+output: pdf_document
+bibliography: rpoSsummer2017.bib
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo =FALSE)
+knitr::opts_chunk$set(cache = TRUE) 
+knitr::opts_chunk$set(message = FALSE) 
+knitr::opts_chunk$set(warning = FALSE) 
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(cluster)
+library("DESeq2")
+library(amap)
+library(mclust)
+library(stringr)
+# read in table of all counts
+
+allCounts <- read.csv("DMS2670_LB_NC_000913.tsv", header = T, sep = "\t") 
+allCounts_old <-read.csv("allCounts_new.txt", header = T, sep = "\t") %>%
+  mutate(geneid = X)
+nameTable <- read.csv("nameMapping.txt", header = T, sep = "\t")
+allCounts_old <- left_join(allCounts_old, nameTable, by = "geneid")
+# old data findings ~ Dr. Stoebel
+oldFindings <- read.csv("oldFindings.csv") %>%
+  mutate(genename = geneName)
+# find genes differentially expressed between 0% and 100% which are not bonferroni adjusted (this is exported from the ReRewritten_RNASeq_Analysis_2017)
+NonBonferroniRegulatedGenesOld <- read.csv("NonBonferroniRegulatedGenesOld.txt", header = T, sep = "\t")
+```
+```{r, echo=F}
+arabinoseRpoS.table <- data.frame("arabinose" = c(0, 1e-05, 5e-05, 1e-04, 2e-04, 5e-04, 0.001, 0.002, 0.005, 0.01, 0.05, 0.1), "rpoSlevel" = c(0.99, 1.34, 12.58,  21.39, 26.78, 40.37, 49.36, 130.95, 191.37, 177.51, 213.24, 218.08))
+
+araRpoS.toUse <- data.frame("arabinose" = c(0, 1e-05, 5e-05, 1e-04, 0.001, 0.002, 0.005), 
+                            "rpoSlevel" = c(0, 0.35, 11.59,  20.40, 48.37, 129.96, 190.38))
+araRpoS.toUse
+```
+
+We use the table of arabinose and according RpoS levels measured. Noticing that 0% arabinose gave 0.99% rpoS, Dr. Stoebel suggested that we substract 0.99 from every RpoS level. Some of the RpoS levels were left out in the RNA Seq data set, so we obtain he araRpoS.toUse table above. 
+
+We first organize the allCounts data, which is given to us in unnormalized read counts.  
+```{r, echo=F, warning = F, message = F}
+#collect the geneids
+allCounts$GeneidBackup = allCounts$Geneid
+# note that the geneids here are really long and contain a lot of information. We are going to parse those out, and first...
+# make a separate column for gene feature (CDS, AS_CDS, IGR, etc). 
+allCounts <- allCounts %>% separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+allCounts <- allCounts %>% select(Geneid, feature,                                           "0.00_A" = A0, # relabel the columns to reflect RpoS level, not arabinose
+         "0.00_B" = B0,
+         "0.00_C" = C0,
+         "0.35_A" = A10..5,
+         "0.35_B" = B10..5,
+         "0.35_C" = C10..5,
+        "11.59_A" = A5x10.5,
+         "11.59_B" = B5x10.5,
+        "11.59_C" = C5x10.5,
+        "20.40_A" = A10..4,
+        "20.40_B" = B10..4,
+        "20.40_C" = C10..4,
+        "48.37_A" = A10..3,
+        "48.37_B" = B10..3,
+        "48.37_C" = C10..3,
+       "100.00_A" = A2537,
+       "100.00_B" = B2537,
+       "100.00_C" = C2537,
+       "129.96_A" = A2x10..3,
+       "129.96_B" = B2x10..3,
+       "129.96_C" = C2x10..3,
+       "190.38_A" = A5x10..3,
+       "190.38_B" = B5x10..3,
+       "190.38_C" = C5x10..3)
+
+allCounts %>% group_by(feature) %>% summarise(number_of_genes = n())
+```
+Above, we see the breakdown by feature in our data. The AS before the first five rows simply means "anti-sens" meaning that the read was read backwards, so to speak, but it still belongs to the feature after the "_". For every read in our data, there an antisens read.
+CDS means coding sequence; these will have bnumbers (bnum). IGR stands for intergenic region; these are regions between genes. ncRNA stands for non-coding RNA. rRNA is ribosomal RNA and tRNA is transfer RNA; these are both removed as much as possible lest the dominate the read counts, but some slip in as we can see.  
+
+```{r}
+# Now, we must extract the genenames from each Geneid. However, each feature has a slightly different pattern, and we will need to do the features separately. 
+
+# IGR's (this includes AS_IGRSs): 
+# IGR stands for intergenic region which means a region between coding sequences or different types of RNA. Therefore, we'll have a start.bnum and end.bnum as well as a start.genename and end.genename. Note that not all genes will have a bnum (only CDS/AS_CDS do)
+bnum = "b[0-9]{4}" # what do bnumbers look like?
+genename = ",[a-z]{3}[A-Z,]." # what does a genename look like? this is regexp lingo
+rna.name = ",rna[0-9].." # what does an RNA name look like?
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid # store the Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]") # separate the first part of the Geneid which talks about the IGR's start gene (Geneid1) and the last part of the IGR Geneid which talks about that IGR's end gene (Geneid2). 
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1 #start feature
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when( #start gene name: many possibilities!
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename), #if the start feature was CDS, then the name is going to be genename style, so we extract a genename-type thing from Geneid1
+    TRUE ~ str_extract(igr$Geneid1, rna.name)) #otherwise, it's going to have an RNA-style name, so we extract the rna.name from Geneid1
+igr$end.gene <- case_when( #end gene neame: similar to above!
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename), # if the end feature was CDS, then we're looking for a genename-type bit from Geneid2
+    TRUE ~ str_extract(igr$Geneid2, rna.name)) #otherwise, it must be an RNA-style label of some sort. 
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum), #bnums only exist for CDS, so we check if the feature is CDS before extracting a bnum from Geneid1
+    TRUE ~ "none") # if not CDS, then no bnum exists so we can put "none"
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum), #same thing as above but for end bnum
+    TRUE ~ "none")
+# now get rid of all those pesky commas that got into our start.gene labels. I could have not included the punctuation in my regex pattern, but then str_extract() might have gotten confused with a less specific pattern
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% select(-comma)
+allCounts <- full_join(igr, allCounts) #add this new information to allCounts!
+```
+```{r, echo=F, warning = F, message = F}
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.." #new genename pattern
+#bnum pattern stays the same
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename) #extract those genenames!
+cds$bnum <- str_extract(cds$Geneid, bnum) # extract them bnums!
+#get rid of the pesky colon that was part of the pattern
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, cds) #add the new info to allCounts
+```
+```{r, echo=F, warning = F, message = F}
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].." #new rna.name pattern
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA"))
+rna$genename <- str_extract(rna$Geneid, rna.name) #record those rna.names
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon) #get rid of colon
+allCounts <- full_join(allCounts, rna) #update allCounts with ncRNA names!
+
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA"))
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name) #same rna.name pattern exists as above, so extract those rna.names! And store the result as genename - I know. This is just for convenience's sake so we have a common column to refer to when we want the short hand name for a gene. 
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon) #get rid of that colon
+allCounts <- full_join(allCounts, rRNA) #update allCounts
+
+#tRNA -- analogous to rRNA above. 
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA"))
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+
+# remove the NA rows we just created by full_joining while adding the ncRNA, rRNA, tRNA genenames
+allCounts <- filter(allCounts, feature %in% c("IGR", "AS_IGR") | genename != "NA")
+
+# make tidy data
+countsTable.all.tidy <- allCounts %>%
+  gather(cond.samps, rawCount, -Geneid, -feature, -genename, -bnum, -Geneid1, -Geneid2, -feature1, -feature2, -start.gene, -end.gene, -start.bnum, - end.bnum)
+```
+
+Differential Expression Analysis
+
+We are first interested in knowing if 0% and 0.35% are differentially expressed for ANY genes, like some sort of super sensitive genes!
+
+0% vs. 0.35% 
+```{r, echo=F, warning=F, message=F}
+# compare 0 to 0.0035
+countsTable.0.0035 <- allCounts %>%
+  select(Geneid, genename, `0.00_A`, `0.35_A`,`0.00_B`, `0.35_B`, `0.00_C`, `0.35_C`)
+# define conditions
+condition.0.0035 <- as.factor(c("0.00", "0.35","0.00", "0.35", "0.00", "0.35"))
+# make coldata input for DESeq (this tells DESeq what count belongs to what sample)
+coldata.0.0035 <- as.data.frame(row.names =  colnames(countsTable.0.0035)[3:8], condition.0.0035) # we index colnames(countsTable.0.0035)[3:8] because we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+countsRaw.0.0035 <- countsTable.0.0035 %>% # select just the raw counts
+  select(`0.00_A`, `0.35_A`,`0.00_B`, `0.35_B`, `0.00_C`, `0.35_C`)
+rownames(countsRaw.0.0035) = countsTable.0.0035$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0.0035 <- DESeqDataSetFromMatrix(countData = countsRaw.0.0035, colData = coldata.0.0035, design = ~condition.0.0035)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.0.0035 <- DESeq(cds.0.0035)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results.0.0035 <- results(cds.0.0035, alpha = .05)
+summary(results.0.0035) #wonderful little function that shows you what the results are in terms of up and down regulaon at your chosen alpha
+# adjusted pvals
+summary(results.0.0035$padj)
+length(filter(as.data.frame(results.0.0035), pvalue < 0.05)$pvalue)
+```
+No genes are found differentially expressed between 0% and 0.35% RpoS. There are also surprisingly few with unadjusted pvalue below 0.05...
+
+##0% vs. 11.59%
+If 0% and 0.35% were not differentially expressed, how about 0% vs 11.59%?
+```{r, echo=F, warning=F, message=F}
+# compare 0 to 0.1159
+countsTable.0.1159 <- allCounts %>%
+  select(Geneid, genename, `0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`)
+# define conditions
+condition.0.1159 <- as.factor(c("0.00", "11.59","0.00", "11.59", "0.00", "11.59"))
+coldata.0.1159 <- data.frame(row.names = colnames(countsTable.0.1159)[3:8], condition.0.1159) # note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw.0.1159 <- countsTable.0.1159 %>%
+  select(`0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`)
+rownames(countsRaw.0.1159) = countsTable.0.1159$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0.1159 <- DESeqDataSetFromMatrix(countData = countsRaw.0.1159, colData = coldata.0.1159, design = ~condition.0.1159)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.0.1159 <- DESeq(cds.0.1159)
+#estimating dispersion by treating samples as replicates
+#get results
+results.0.1159 <- results(cds.0.1159, alpha = 0.05)
+summary(results.0.1159)
+#FDR adjusted pvals
+summary(filter(as.data.frame(results.0.1159), padj < 0.05)$padj)
+ggplot(data = filter(as.data.frame(results.0.1159), padj < 0.05), aes(x = seq_along(padj), y = padj)) + geom_point(alpha = 0.6)
+```
+402 genes were found differentially expressed between 0% and 11.59% RpoS at the 0.05 significance level. As these represent only 3% of the genes, they could be false positives.
+
+##129.96% vs 190.38%
+Next, we test for differential expression across 129.96% and 190.38%, as we wonder whether RpoS levels past 100% (wild type) significantly affect gene expression.
+```{r, echo=FALSE, warning=FALSE, message=F}
+countsTable_129.96_190.38 <- allCounts %>%
+  select(Geneid, genename, `129.96_A`, `190.38_A`,`129.96_B`, `190.38_B`, `129.96_C`, `190.38_C`)
+
+# define conditions
+condition_129.96_190.38 <- as.factor(c("129.96", "190.38","129.96", "190.38", "129.96", "190.38"))
+coldata_129.96_190.38 <- data.frame(row.names = colnames(countsTable_129.96_190.38)[3:8], condition_129.96_190.38)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_129.96_190.38 <- countsTable_129.96_190.38 %>%
+  select(`129.96_A`, `190.38_A`,`129.96_B`, `190.38_B`, `129.96_C`, `190.38_C`)
+rownames(countsRaw_129.96_190.38) = countsTable_129.96_190.38$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_129.96_190.38 <- DESeqDataSetFromMatrix(countData = countsRaw_129.96_190.38, colData = coldata_129.96_190.38, design = ~condition_129.96_190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_129.96_190.38 <- DESeq(cds_129.96_190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_129.96_190.38 <- results(cds_129.96_190.38, alpha = 0.05)
+summary(results_129.96_190.38)
+summary(results_129.96_190.38$padj)
+# unadjusted pvalues
+summary(results_129.96_190.38$pvalue)
+length((filter(as.data.frame(results_129.96_190.38), pvalue < 0.05))$pvalue)
+```
+398 genes are found to be differentially expressed between 129.96% and 190.38% RpoS. Again, that is only about 3% of the genes considered. 
+
+# Find the Regulon: 0% vs 190.38% RpoS
+We find the genes regulated by RpoS by finding the genes which are differentially expressed between the highest and lowest RpoS levels. The logic here is the assumption that genes are more or less monotonic across the levels (which, actually, does not seem to be the case in our data observing the scatter plots later). 
+
+```{r, echo=F, message=F}
+# compare 0 to 190.38
+countsTable.0.190.38 <- allCounts %>%
+  select(Geneid, `0.00_A`, `190.38_A`,`0.00_B`, `190.38_B`, `0.00_C`, `190.38_C`)
+# define conditions
+condition.0.190.38 <- as.factor(c("0.00", "190.38","0.00", "190.38", "0.00", "190.38"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable.0.190.38)) %>%
+  filter(endsWith(colnames(countsTable.0.190.38), "A") 
+         | endsWith(colnames(countsTable.0.190.38), "B") 
+         | endsWith(colnames(countsTable.0.190.38),"C"))
+coldata.0.190.38 <- data.frame(row.names = colnames(countsTable.0.190.38)[2:7], condition.0.190.38)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw.0.190.38<- countsTable.0.190.38 %>%
+  select(`0.00_A`, `190.38_A`,`0.00_B`, `190.38_B`, `0.00_C`, `190.38_C`)
+rownames(countsRaw.0.190.38) = countsTable.0.190.38$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0.190.38 <- DESeqDataSetFromMatrix(countData = countsRaw.0.190.38, colData = coldata.0.190.38, design = ~condition.0.190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.0.190.38 <- DESeq(cds.0.190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results.0.190.38 <- results(cds.0.190.38, alpha = 0.05)
+summary(results.0.190.38)
+```
+
+2122 genes (16% of the genes considered) are differentially expressed across 0% and 190.38% at the 0.05 significance level. We will call these the RpoS-regulated genes, and these will be the genes with which we move forward for profile assignment. 
+```{r, echo=F, message=F}
+# make table of the 2122 regulated genes
+regulated.genes <- data.frame(padj.0.190.38 = results.0.190.38$padj, feature = allCounts$feature, Geneid = rownames(results.0.190.38)) %>%
+  filter(padj.0.190.38 < 0.05)
+
+regulated.genes %>%
+  group_by(feature)%>%
+  summarize(n())
+```
+Note: 1551 "regulated" genes are found if we allow genes differentially expressed between 0% vs 129.96% to be our regulon. These match up with 0% vs 190% regulon for 1309 genes.
+
+Of those regulated genes, how many are differentially expressed across 0% and 11.59% as well as between 129.96% and 190.38%? Above, when we did those tests, our success rate seemed low. But of course it was; the majority of genes are not regulated by RpoS at all. Now, let's take the regulated genes, and see if we find differential expression across these levels in question, or rule it out as just noise. 
+
+```{r}
+# compare 0 to 0.1159
+countsTable.0.1159 <- allCounts %>%
+  filter(Geneid %in% regulated.genes$Geneid) %>%
+  select(Geneid, genename, `0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`)
+# define conditions
+condition.0.1159 <- as.factor(c("0.00", "11.59","0.00", "11.59", "0.00", "11.59"))
+coldata.0.1159 <- data.frame(row.names = colnames(countsTable.0.1159)[3:8], condition.0.1159) # note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw.0.1159 <- countsTable.0.1159 %>%
+  select(`0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`)
+rownames(countsRaw.0.1159) = countsTable.0.1159$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0.1159 <- DESeqDataSetFromMatrix(countData = countsRaw.0.1159, colData = coldata.0.1159, design = ~condition.0.1159)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.0.1159 <- DESeq(cds.0.1159)
+#estimating dispersion by treating samples as replicates
+#get results
+results.0.1159 <- results(cds.0.1159, alpha = 0.05)
+summary(results.0.1159)
+#FDR adjusted pvals
+summary(filter(as.data.frame(results.0.1159), padj < 0.05)$padj)
+ggplot(data = filter(as.data.frame(results.0.1159), padj < 0.05), aes(x = seq_along(padj), y = padj)) + geom_point(alpha = 0.6)
+
+countsTable_129.96_190.38 <- allCounts %>%
+  filter(Geneid %in% regulated.genes$Geneid) %>%
+  select(Geneid, genename, `129.96_A`, `190.38_A`,`129.96_B`, `190.38_B`, `129.96_C`, `190.38_C`)
+
+# define conditions
+condition_129.96_190.38 <- as.factor(c("129.96", "190.38","129.96", "190.38", "129.96", "190.38"))
+coldata_129.96_190.38 <- data.frame(row.names = colnames(countsTable_129.96_190.38)[3:8], condition_129.96_190.38)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_129.96_190.38 <- countsTable_129.96_190.38 %>%
+  select(`129.96_A`, `190.38_A`,`129.96_B`, `190.38_B`, `129.96_C`, `190.38_C`)
+rownames(countsRaw_129.96_190.38) = countsTable_129.96_190.38$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_129.96_190.38 <- DESeqDataSetFromMatrix(countData = countsRaw_129.96_190.38, colData = coldata_129.96_190.38, design = ~condition_129.96_190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_129.96_190.38 <- DESeq(cds_129.96_190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_129.96_190.38 <- results(cds_129.96_190.38, alpha = 0.05)
+summary(results_129.96_190.38)
+summary(results_129.96_190.38$padj)
+# unadjusted pvalues
+summary(results_129.96_190.38$pvalue)
+length((filter(as.data.frame(results_129.96_190.38), pvalue < 0.05))$pvalue)
+```
+
+Of the genes we are calling regulated (differentially expressed between 0% and 190.38% RpoS), 29% are differnetially expressed between 0% and 11.59% and 16.8% are differentially expressed between 129.96% and 190.38% RpoS. By considering only regulated genes, this seems like a better measure of what is really going on and discourages the idea that these differential expression results are all just false discoveries.
+
+Next, we normalize the counts across all conditions and samples excluding 100%. We will use these counts to plot and sort the data. We exclude 100% from any further analysis because the 100% (wild type) does not have the rssB deletion in the speciments used in all other conditions (it was the rssB deletion which allowed Dr. Stoebel's lab to vary the level of RpoS in the bacteria).
+```{r, echo = FALSE, warning=FALSE, message=FALSE}
+# get normalized counts and DESeq across all groups
+countsTable.all <- allCounts %>%
+  select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+# define conditions
+condition.all <- as.factor(c("0.00", "0.00", "0.00", "0.35", "0.35", "0.35", "11.59", "11.59", "11.59", "20.40",  "20.40",  "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", "129.96", "190.38", "190.38", "190.38"))
+coldata.all <- as.data.frame(row.names =  colnames(countsTable.all), condition.all)
+cds.all <- DESeqDataSetFromMatrix(countData = countsTable.all, colData = coldata.all, design = ~condition.all)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.all <- DESeq(cds.all)
+#cds.all <- estimateSizeFactors(cds.all, locfunc = genefilter::shorth)
+#cds.all <- estimateDispersions(cds.all)
+#cds.all <- nbinomWaldTest(cds.all)
+results.all <- results(cds.all)
+```
+```{r, echo=FALSE, message=F}
+normCounts.all <- as.data.frame(counts(cds.all, normalized = TRUE)) %>%
+  mutate(genename = allCounts$genename, Geneid = allCounts$Geneid)
+
+regulated.genes <- left_join(regulated.genes, normCounts.all) %>%
+  group_by(Geneid) %>%
+  mutate(slope = ifelse(mean(cbind(`0.00_A`, `0.00_B`, `0.00_C`)) < mean(cbind(`190.38_A`, `190.38_B`, `190.38_C`)), "positive", "negative"))
+         #weird_129.96 = ifelse(slope == "positive",
+                               #ifelse(mean(cbind(`100.00_A`, `100.00_B`, `100.00_C`)) > mean(c(`129.96_A`,`129.96_B`,`129.96_C`)), TRUE, FALSE),
+                               #slope == "negative"
+                               #ifelse(mean(cbind(`100.00_A`, `100.00_B`, `100.00_C`)) < mean(c(`129.96_A`,`129.96_B`,`129.96_C`)), TRUE, FALSE)))
+```
+```{r, echo=F, message=F}
+# make tidy! And ready to plot
+regulated.tidy <- regulated.genes %>%
+  gather(nlevel, normCount, `0.00_A`:`190.38_C`) %>%
+  separate(nlevel, c("nlevel", "sample"), sep = "[_]") %>%
+  mutate(nlevel = as.numeric(nlevel)/100) %>%
+  arrange(Geneid) %>%
+  group_by(Geneid, nlevel) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(Geneid) %>%
+  mutate(scaler = ifelse(slope == "positive", levelMean[16], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() 
+
+regulated.tidy %>%
+  group_by(feature) %>%
+  summarize(num = n()/24,
+            percentage = num/2140*100)
+
+regulated.tidy %>%
+  group_by(Geneid, nlevel) %>%
+  summarize(standardDev = sd(normCount)) %>%
+  ungroup(Geneid) %>% group_by(nlevel) %>%
+  summarize(min = min(standardDev), Q1=quantile(standardDev, p=.25), Med=median(standardDev), Q3=quantile(standardDev, p=.75), max = max(standardDev))
+```
+
+# Genes Whose Expression Pattern Differs at Wild Type (rssB present)
+We ask what genes are differentially expressed betwen 48.37% and 100% as well as 100% and 129.96%. Of these, we want to know which go down at 100% but back up again at 129.96% as well as which go up at 100% but down again at 129.96%. These are genes whose expression pattern appears differnt at rssB's presence. However, monotonicity is a struggle througout the data set, and non-monotonicity at 100% may not be indicative of anything interesting goint on. 
+100% vs 129.96%
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+countsTable_100_129.96 <- allCounts %>%
+  select(Geneid, genename, `100.00_A`, `129.96_A`,`100.00_B`, `129.96_B`, `100.00_C`, `129.96_C`)
+
+# define conditions
+condition_100_129.96 <- as.factor(c("100.00", "129.96","100.00", "129.96", "100.00", "129.96"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable_100_129.96)) %>%
+  filter(endsWith(colnames(countsTable_100_129.96), "A") 
+         | endsWith(colnames(countsTable_100_129.96), "B") 
+         | endsWith(colnames(countsTable_100_129.96),"C"))
+coldata_100_129.96 <- data.frame(row.names = colnames(countsTable_100_129.96)[3:8], condition_100_129.96)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_100_129.96 <- countsTable_100_129.96 %>%
+  select(`100.00_A`, `129.96_A`,`100.00_B`, `129.96_B`, `100.00_C`, `129.96_C`)
+rownames(countsRaw_100_129.96) = countsTable_100_129.96$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_100_129.96 <- DESeqDataSetFromMatrix(countData = countsRaw_100_129.96, colData = coldata_100_129.96, design = ~condition_100_129.96)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_100_129.96 <- DESeq(cds_100_129.96)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_100_129.96 <- results(cds_100_129.96, alpha = 0.1/2)#bonferroni: two comparisions, 100% vs 129.96% and 48.37% vs 100%
+summary(results_100_129.96)
+summary(results_100_129.96$padj)
+```
+```{r, echo=FALSE, message=F}
+DE.100.129.genes <- data.frame(padj.100.129.96 = results_100_129.96$padj, feature = allCounts$feature, genename = allCounts$genename, start.gene = allCounts$start.gene, end.gene = allCounts$end.gene, Geneid = allCounts$Geneid)
+
+DE.100.129.genes <- DE.100.129.genes %>%
+  mutate(slope.100.129.96 = case_when(results_100_129.96$log2FoldChange > 0 ~ "positive", 
+                                      TRUE ~ "negative")) %>%
+  filter(padj.100.129.96 < 0.1/2) #bonferroni with confidence level of 0.1
+```
+48.37% vs 100%
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+countsTable_48.37_100 <- allCounts %>%
+  select(Geneid, genename, `48.37_A`, `100.00_A`,`48.37_B`, `100.00_B`, `48.37_C`, `100.00_C`)
+
+# define conditions
+condition_48.37_100 <- as.factor(c("48.37", "100.00","48.37", "100.00", "48.37", "100.00"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable_48.37_100)) %>%
+  filter(endsWith(colnames(countsTable_48.37_100), "A") 
+         | endsWith(colnames(countsTable_48.37_100), "B") 
+         | endsWith(colnames(countsTable_48.37_100),"C"))
+coldata_48.37_100 <- data.frame(row.names = colnames(countsTable_48.37_100)[3:8], condition_48.37_100)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw_48.37_100 <- countsTable_48.37_100 %>%
+  select(`48.37_A`, `100.00_A`,`48.37_B`, `100.00_B`, `48.37_C`, `100.00_C`)
+rownames(countsRaw_48.37_100) = countsTable_48.37_100$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds_48.37_100 <- DESeqDataSetFromMatrix(countData = countsRaw_48.37_100, colData = coldata_48.37_100, design = ~condition_48.37_100)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds_48.37_100 <- DESeq(cds_48.37_100)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results_48.37_100 <- results(cds_48.37_100, alpha = 0.1/2) #bonferroni
+summary(results_48.37_100)
+summary(results_48.37_100$padj)
+```
+```{r, echo=FALSE, message=F}
+DE.48.100.genes <- data.frame(padj.48.100 = results_48.37_100$padj, feature = allCounts$feature, genename = allCounts$genename, start.gene = allCounts$start.gene, end.gene = allCounts$end.gene, Geneid = allCounts$Geneid)
+DE.48.100.genes <- DE.48.100.genes %>%
+  mutate(slope.48.100 = case_when(results_48.37_100$log2FoldChange > 0 ~ "positive", 
+                                      TRUE ~ "negative")) %>%
+  filter(padj.48.100 < 0.1/2) #bonferroni
+```
+```{r, echo=F, message=F}
+# make a table of those genes
+influenced.by.rssB <- inner_join(DE.100.129.genes, DE.48.100.genes)
+```
+```{r, echo=F, message=F}
+# get normalized counts and DESeq across all groups
+countsTable.influenced <- allCounts %>%
+  select(`48.37_A`, `48.37_B`, `48.37_C`, `100.00_A`, `100.00_B`, `100.00_C`, `129.96_A`, `129.96_B`, `129.96_C`)
+# define conditions
+condition.influenced <- as.factor(c("48.37", "48.37", "48.37", "100.00", "100.00", "100.00", "129.96", "129.96", "129.96"))
+coldata.influenced <- as.data.frame(row.names =  colnames(countsTable.influenced), condition.influenced)
+cds.influenced <- DESeqDataSetFromMatrix(countData = countsTable.influenced, colData = coldata.influenced, design = ~condition.influenced)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.influenced <- DESeq(cds.influenced)
+#cds.all <- estimateSizeFactors(cds.all, locfunc = genefilter::shorth)
+#cds.all <- estimateDispersions(cds.all)
+#cds.all <- nbinomWaldTest(cds.all)
+results.influenced <- results(cds.influenced)
+```
+```{r, echo=F, message=F}
+normCounts.influenced <- as.data.frame(counts(cds.influenced, normalized = TRUE)) %>%
+  mutate(genename = allCounts$genename, Geneid = allCounts$Geneid)
+
+influenced.by.rssB <- left_join(influenced.by.rssB, normCounts.influenced, by = c("Geneid", "genename")) 
+```
+```{r, echo=F, message=F, warning=F}
+#plot the genes that are influenced by rssB
+influenced.tidy <- influenced.by.rssB %>%
+  gather(cond.samp, normCount, `48.37_A`:`129.96_C`) %>%
+  separate(cond.samp, c("RpoS%", "sample"), sep = "[_]") %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)/100) %>%
+  arrange(Geneid) %>%
+  group_by(Geneid, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(Geneid) %>%
+  mutate(scaler = levelMean[4],
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler, 
+         influenced = case_when(levelMean[1] > levelMean[4] & levelMean[7] > levelMean[4] ~ TRUE,
+                                levelMean[1] < levelMean[4] & levelMean[7] < levelMean[4] ~ TRUE,
+                                TRUE ~ FALSE)) %>%
+  ungroup() %>%
+  filter(influenced) %>% #save only the genes that whose slope is not monotonic across 48%, 100%, and 129% 
+  select(-influenced) 
+influenced.by.rssB <- filter(influenced.by.rssB, Geneid %in% influenced.tidy$Geneid) #update wide data frame
+  
+write.table(influenced.tidy, "InflunencedBy.rssB.txt", sep="\t")
+ggplot(data = influenced.tidy, aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = influenced.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + ggtitle(paste(length(influenced.by.rssB$Geneid), "genes whose expression changes significantly (FDRp < 0.05/2) at 100% RpoS")) + theme(legend.position = "none")
+```
+
+We see the plot above where genes which are differentially expressed between 48.37% and 100% as well as between 100% and 129.96% and which are not monotonic at across the three levels. 
+
+# Exploring the Data for Concerning Phenomena
+We explore the data across all gene features looking at size factor differences and sequencing depth. The key information is in the Questions_Regarding_2017 Data.Rmd, and this section may very well be deleted later, or summarised to the most important points, which are something along the lines of:
+
+1) Does the sequencing depth seem deep enough, and would higher sequencing depth produce better data?
+
+2) Is the variation of medians and thrid quartiles of the raw counts across each sample a cause for concern? We wonder why the raw read counts for the vast majority of genes are so low, and how we can distinguish actual counts from noise at reads this low.
+
+3) Do the few genes with very large raw read counts suggest a problem? 
+
+4) Does the spread of size factors suggest a problem, or is this a typical distribution?
+
+5) Do the correlations between replicates at each condition suggest that the replicates are not true replicates?
+
+6) Is it a problem that the proportion of genes from each feature (CDS, IGR, ncRNA, tRNA, rRNA) varies across the different samples? 
+
+See a more consise version in Questions_Regarding_2017_Data or, for a yet more concise version, Questions_Regarding_2017_Data_Simplified. Below is simply a lot of code from which I build the Questions file. 
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+allWaySizeFactors <- as.data.frame(sizeFactors(cds.all)) 
+cond.samp = rownames(allWaySizeFactors)
+allWaySizeFactors <- allWaySizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+seqDepth <- as.data.frame(colSums(countsTable.all)) %>% mutate (cond.samp = cond.samp)
+
+Q3.all <- as.data.frame(t(countsTable.all %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(Q3.all) = c("Q3", "cond.samp")
+
+
+seqDepth.sizeFactors <- inner_join(Q3.all, inner_join(allWaySizeFactors, seqDepth, by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.allRegions = sizeFactors(cds.all), 
+         sequencingDepth.allRegions = colSums(countsTable.all),
+         Q3.allRegions = Q3) %>%
+  select(cond.samp, sizeFactors.allRegions, sequencingDepth.allRegions, Q3.allRegions) %>%
+  mutate(cond.samps = cond.samp) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors, aes(x = sequencingDepth.allRegions, y = sizeFactors.allRegions, col = cond.samps)) + geom_point(size = 2) + ggtitle("Sequencing Depth (condition column sums) vs. Size Factors; all Gene Features")
+
+ggplot(data = seqDepth.sizeFactors, aes(x = Q3.allRegions, y = sizeFactors.allRegions, col = cond.samps)) + geom_point() + ggtitle("Sequencing Depth (condition column sums) vs. Thrid Quartile; all Gene Features")
+
+#plot(dispersions(cds.all))
+
+summary.all <- countsTable.all.tidy %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.all <- inner_join(summary.all, seqDepth.sizeFactors, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+#boxplot
+ggplot(countsTable.all.tidy, aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,60)) + ggtitle("Raw Counts Per Gene All Regions") + theme(axis.text.x = element_text(angle = 60, hjust = 1))
+```
+We see very stark differences in the sequencing depths between the different samples. This is also evidenced by the widely spaced size factors. The size factors being more correlated to Q3 than to sequencing depth makes sense given the size factor median-based size factor calculation DESeq performs. 
+
+CDS only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.CDS <- filter(allCounts, feature == "CDS") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.CDS <- as.data.frame(row.names = colnames(countsTable.CDS), condition.all)
+dds.CDS <- DESeqDataSetFromMatrix(countData = countsTable.CDS, colData = coldata.CDS, design = ~ condition.all)
+dds.CDS <- DESeq(dds.CDS)
+colSums(countsTable.CDS)
+
+```
+analyse
+```{r,echo=F, message=F, warning=F}
+#with 100 removed
+CDS.SizeFactors <- as.data.frame(sizeFactors(dds.CDS)) 
+cond.samp = rownames(CDS.SizeFactors)
+CDS.SizeFactors <- CDS.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+CDS.SeqDepth <- as.data.frame(colSums(countsTable.CDS)) %>% mutate (cond.samp = cond.samp)
+
+CDS.Q3 <- as.data.frame(t(countsTable.CDS %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(CDS.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.CDS <- inner_join(CDS.Q3, inner_join(CDS.SizeFactors, CDS.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.CDS = sizeFactors(dds.CDS), 
+         sequencingDepth.CDS = colSums(countsTable.CDS),
+         Q3.CDS = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.CDS, sequencingDepth.CDS, Q3.CDS, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.CDS, aes(x = sequencingDepth.CDS, y = sizeFactors.CDS, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.CDS, aes(x = Q3.CDS, y = sizeFactors.CDS, col = cond.samps)) + geom_point()
+
+summary.CDS <- filter(countsTable.all.tidy, feature == "CDS") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.CDS <- inner_join(summary.CDS, seqDepth.sizeFactors.CDS, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+ggplot(filter(countsTable.all.tidy, feature == "CDS"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("CDS")
+ggplot(filter(countsTable.all.tidy, feature == "CDS"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,200)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("CDS")
+```
+AS_CDS only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.AS_CDS <- filter(allCounts, feature == "AS_CDS") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.AS_CDS <- as.data.frame(row.names = colnames(countsTable.AS_CDS), condition.all)
+dds.AS_CDS <- DESeqDataSetFromMatrix(countData = countsTable.AS_CDS, colData = coldata.AS_CDS, design = ~ condition.all)
+dds.AS_CDS <- DESeq(dds.AS_CDS)
+colSums(countsTable.AS_CDS)
+
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+AS_CDS.SizeFactors <- as.data.frame(sizeFactors(dds.AS_CDS)) 
+cond.samp = rownames(AS_CDS.SizeFactors)
+AS_CDS.SizeFactors <- AS_CDS.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+AS_CDS.SeqDepth <- as.data.frame(colSums(countsTable.AS_CDS)) %>% mutate (cond.samp = cond.samp)
+
+AS_CDS.Q3 <- as.data.frame(t(countsTable.AS_CDS %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(AS_CDS.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.AS_CDS <- inner_join(AS_CDS.Q3, inner_join(AS_CDS.SizeFactors, AS_CDS.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.AS_CDS = sizeFactors(dds.AS_CDS), 
+         sequencingDepth.AS_CDS = colSums(countsTable.AS_CDS),
+         Q3.AS_CDS = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.AS_CDS, sequencingDepth.AS_CDS, Q3.AS_CDS, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.AS_CDS, aes(x = sequencingDepth.AS_CDS, y = sizeFactors.AS_CDS, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.AS_CDS, aes(x = Q3.AS_CDS, y = sizeFactors.AS_CDS, col = cond.samps)) + geom_point()
+
+summary.AS_CDS <- filter(countsTable.all.tidy, feature == "AS_CDS") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.AS_CDS <- inner_join(summary.AS_CDS, seqDepth.sizeFactors.AS_CDS, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+ggplot(filter(countsTable.all.tidy, feature == "AS_CDS"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_CDS")
+ggplot(filter(countsTable.all.tidy, feature == "AS_CDS"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,20)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_CDS")
+
+plot(dispersions(dds.AS_CDS))
+
+summary(summary.AS_CDS$Q3)
+
+```
+IGR only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.IGR <- filter(allCounts, feature == "IGR") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.IGR <- as.data.frame(row.names = colnames(countsTable.IGR), condition.all)
+dds.IGR <- DESeqDataSetFromMatrix(countData = countsTable.IGR, colData = coldata.IGR, design = ~ condition.all)
+dds.IGR <- DESeq(dds.IGR)
+colSums(countsTable.IGR)
+
+```
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+IGR.SizeFactors <- as.data.frame(sizeFactors(dds.IGR)) 
+cond.samp = rownames(IGR.SizeFactors)
+IGR.SizeFactors <- IGR.SizeFactors %>%
+  mutate(cond.samp = cond.samp) # label rows for future inner_joining
+#with 100 removed
+IGR.SeqDepth <- as.data.frame(colSums(countsTable.IGR)) %>% mutate (cond.samp = cond.samp)
+
+IGR.Q3 <- as.data.frame(t(countsTable.IGR %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(IGR.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.IGR <- inner_join(IGR.Q3, inner_join(IGR.SizeFactors, IGR.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.IGR = sizeFactors(dds.IGR), 
+         sequencingDepth.IGR = colSums(countsTable.IGR),
+         Q3.IGR = Q3) %>%
+  select(cond.samp, sizeFactors.IGR, sequencingDepth.IGR, Q3.IGR) %>%
+  mutate(cond.samps = cond.samp) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.IGR, aes(x = sequencingDepth.IGR, y = sizeFactors.IGR, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.IGR, aes(x = Q3.IGR, y = sizeFactors.IGR, col = cond.samps)) + geom_point()
+
+summary.IGR <- filter(countsTable.all.tidy, feature == "IGR") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.IGR <- inner_join(summary.IGR, seqDepth.sizeFactors.IGR, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+ggplot(filter(countsTable.all.tidy, feature == "IGR"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("IGR")
+ggplot(filter(countsTable.all.tidy, feature == "IGR"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,25)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("IGR")
+
+plot(dispersions(dds.IGR))
+
+```
+AS_IGR only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.AS_IGR <- filter(allCounts, feature == "AS_IGR") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.AS_IGR <- as.data.frame(row.names = colnames(countsTable.AS_IGR), condition.all)
+dds.AS_IGR <- DESeqDataSetFromMatrix(countData = countsTable.AS_IGR, colData = coldata.AS_IGR, design = ~ condition.all)
+dds.AS_IGR <- DESeq(dds.AS_IGR)
+colSums(countsTable.AS_IGR)
+
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+AS_IGR.SizeFactors <- as.data.frame(sizeFactors(dds.AS_IGR)) 
+cond.samp = rownames(AS_IGR.SizeFactors)
+AS_IGR.SizeFactors <- AS_IGR.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+AS_IGR.SeqDepth <- as.data.frame(colSums(countsTable.AS_IGR)) %>% mutate (cond.samp = cond.samp)
+
+AS_IGR.Q3 <- as.data.frame(t(countsTable.AS_IGR %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(AS_IGR.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.AS_IGR <- inner_join(AS_IGR.Q3, inner_join(AS_IGR.SizeFactors, AS_IGR.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.AS_IGR = sizeFactors(dds.AS_IGR), 
+         sequencingDepth.AS_IGR = colSums(countsTable.AS_IGR),
+         Q3.AS_IGR = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.AS_IGR, sequencingDepth.AS_IGR, Q3.AS_IGR, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.AS_IGR, aes(x = sequencingDepth.AS_IGR, y = sizeFactors.AS_IGR, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.AS_IGR, aes(x = Q3.AS_IGR, y = sizeFactors.AS_IGR, col = cond.samps)) + geom_point()
+
+summary.AS_IGR <- filter(countsTable.all.tidy, feature == "AS_IGR") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.AS_IGR <- inner_join(summary.AS_IGR, seqDepth.sizeFactors.AS_IGR, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+ggplot(filter(countsTable.all.tidy, feature == "AS_IGR"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_IGR")
+ggplot(filter(countsTable.all.tidy, feature == "AS_IGR"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,20)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_IGR")
+
+plot(dispersions(dds.AS_IGR))
+
+summary(summary.AS_IGR$Q3)
+
+```
+ncRNA only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.ncRNA <- filter(allCounts, feature == "ncRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.ncRNA <- as.data.frame(row.names = colnames(countsTable.ncRNA), condition.all)
+dds.ncRNA <- DESeqDataSetFromMatrix(countData = countsTable.ncRNA, colData = coldata.ncRNA, design = ~ condition.all)
+dds.ncRNA <- DESeq(dds.ncRNA)
+colSums(countsTable.ncRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+ncRNA.SizeFactors <- as.data.frame(sizeFactors(dds.ncRNA)) 
+cond.samp = rownames(ncRNA.SizeFactors)
+ncRNA.SizeFactors <- ncRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+ncRNA.SeqDepth <- as.data.frame(colSums(countsTable.ncRNA)) %>% mutate (cond.samp = cond.samp)
+
+ncRNA.Q3 <- as.data.frame(t(countsTable.ncRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(ncRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.ncRNA <- inner_join(ncRNA.Q3, inner_join(ncRNA.SizeFactors, ncRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.ncRNA = sizeFactors(dds.ncRNA), 
+         sequencingDepth.ncRNA = colSums(countsTable.ncRNA),
+         Q3.ncRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.ncRNA, sequencingDepth.ncRNA, Q3.ncRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.ncRNA, aes(x = sequencingDepth.ncRNA, y = sizeFactors.ncRNA, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.ncRNA, aes(x = Q3.ncRNA, y = sizeFactors.ncRNA, col = cond.samps)) + geom_point()
+
+summary.ncRNA <- filter(countsTable.all.tidy, feature == "ncRNA") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.ncRNA <- inner_join(summary.ncRNA, seqDepth.sizeFactors.ncRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+toplot.ncRNA <- filter(countsTable.all.tidy, feature == "ncRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "ncRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("ncRNA")
+ggplot(filter(countsTable.all.tidy, feature == "ncRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,3000)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("ncRNA")
+
+plot(dispersions(dds.ncRNA))
+
+```
+Really high and very widely spread counts for ncRNA!
+
+AS_ncRNA only
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.AS_ncRNA <- filter(allCounts, feature == "AS_ncRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.AS_ncRNA <- as.data.frame(row.names = colnames(countsTable.AS_ncRNA), condition.all)
+dds.AS_ncRNA <- DESeqDataSetFromMatrix(countData = countsTable.AS_ncRNA, colData = coldata.AS_ncRNA, design = ~ condition.all)
+dds.AS_ncRNA <- DESeq(dds.AS_ncRNA)
+colSums(countsTable.AS_ncRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+AS_ncRNA.SizeFactors <- as.data.frame(sizeFactors(dds.AS_ncRNA)) 
+cond.samp = rownames(AS_ncRNA.SizeFactors)
+AS_ncRNA.SizeFactors <- AS_ncRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+AS_ncRNA.SeqDepth <- as.data.frame(colSums(countsTable.AS_ncRNA)) %>% mutate (cond.samp = cond.samp)
+
+AS_ncRNA.Q3 <- as.data.frame(t(countsTable.AS_ncRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(AS_ncRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.AS_ncRNA <- inner_join(AS_ncRNA.Q3, inner_join(AS_ncRNA.SizeFactors, AS_ncRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.AS_ncRNA = sizeFactors(dds.AS_ncRNA), 
+         sequencingDepth.AS_ncRNA = colSums(countsTable.AS_ncRNA),
+         Q3.AS_ncRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.AS_ncRNA, sequencingDepth.AS_ncRNA, Q3.AS_ncRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.AS_ncRNA, aes(x = sequencingDepth.AS_ncRNA, y = sizeFactors.AS_ncRNA, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.AS_ncRNA, aes(x = Q3.AS_ncRNA, y = sizeFactors.AS_ncRNA, col = cond.samps)) + geom_point()
+
+summary.AS_ncRNA <- filter(countsTable.all.tidy, feature == "AS_ncRNA") %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount)) %>%
+  filter(cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE)
+summary.AS_ncRNA <- inner_join(summary.AS_ncRNA, seqDepth.sizeFactors.AS_ncRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+toplot.AS_ncRNA <- filter(countsTable.all.tidy, feature == "AS_ncRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "AS_ncRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_ncRNA")
+ggplot(filter(countsTable.all.tidy, feature == "AS_ncRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,50)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_ncRNA")
+
+plot(dispersions(dds.AS_ncRNA))
+
+```
+tRNA
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.tRNA <- filter(allCounts, feature == "tRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.tRNA <- as.data.frame(row.names = colnames(countsTable.tRNA), condition.all)
+dds.tRNA <- DESeqDataSetFromMatrix(countData = countsTable.tRNA, colData = coldata.tRNA, design = ~ condition.all)
+dds.tRNA <- DESeq(dds.tRNA)
+colSums(countsTable.tRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+tRNA.SizeFactors <- as.data.frame(sizeFactors(dds.tRNA)) 
+cond.samp = rownames(tRNA.SizeFactors)
+tRNA.SizeFactors <- tRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+tRNA.SeqDepth <- as.data.frame(colSums(countsTable.tRNA)) %>% mutate (cond.samp = cond.samp)
+
+tRNA.Q3 <- as.data.frame(t(countsTable.tRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(tRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.tRNA <- inner_join(tRNA.Q3, inner_join(tRNA.SizeFactors, tRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.tRNA = sizeFactors(dds.tRNA), 
+         sequencingDepth.tRNA = colSums(countsTable.tRNA),
+         Q3.tRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.tRNA, sequencingDepth.tRNA, Q3.tRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.tRNA, aes(x = sequencingDepth.tRNA, y = sizeFactors.tRNA, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.tRNA, aes(x = Q3.tRNA, y = sizeFactors.tRNA, col = cond.samps)) + geom_point()
+
+summary.tRNA <- filter(countsTable.all.tidy, feature == "tRNA", cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE) %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount))
+summary.tRNA <- inner_join(summary.tRNA, seqDepth.sizeFactors.tRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+toplot.tRNA <- filter(countsTable.all.tidy, feature == "tRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "tRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("tRNA")
+ggplot(filter(countsTable.all.tidy, feature == "tRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,700)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("tRNA")
+
+plot(dispersions(dds.tRNA))
+```
+Relatively high and spread counts for tRNA!
+AS_tRNA
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.AS_tRNA <- filter(allCounts, feature == "AS_tRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.AS_tRNA <- as.data.frame(row.names = colnames(countsTable.AS_tRNA), condition.all)
+dds.AS_tRNA <- DESeqDataSetFromMatrix(countData = countsTable.AS_tRNA, colData = coldata.AS_tRNA, design = ~ condition.all)
+dds.AS_tRNA <- DESeq(dds.AS_tRNA)
+colSums(countsTable.AS_tRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+AS_tRNA.SizeFactors <- as.data.frame(sizeFactors(dds.AS_tRNA)) 
+cond.samp = rownames(AS_tRNA.SizeFactors)
+AS_tRNA.SizeFactors <- AS_tRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+AS_tRNA.SeqDepth <- as.data.frame(colSums(countsTable.AS_tRNA)) %>% mutate (cond.samp = cond.samp)
+
+AS_tRNA.Q3 <- as.data.frame(t(countsTable.AS_tRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(AS_tRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.AS_tRNA <- inner_join(AS_tRNA.Q3, inner_join(AS_tRNA.SizeFactors, AS_tRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.AS_tRNA = sizeFactors(dds.AS_tRNA), 
+         sequencingDepth.AS_tRNA = colSums(countsTable.AS_tRNA),
+         Q3.AS_tRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.AS_tRNA, sequencingDepth.AS_tRNA, Q3.AS_tRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.AS_tRNA, aes(x = sequencingDepth.AS_tRNA, y = sizeFactors.AS_tRNA, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.AS_tRNA, aes(x = Q3.AS_tRNA, y = sizeFactors.AS_tRNA, col = cond.samps)) + geom_point()
+
+summary.AS_tRNA <- filter(countsTable.all.tidy, feature == "AS_tRNA", cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE) %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount))
+summary.AS_tRNA <- inner_join(summary.AS_tRNA, seqDepth.sizeFactors.AS_tRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+toplot.AS_tRNA <- filter(countsTable.all.tidy, feature == "AS_tRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "AS_tRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_tRNA")
+ggplot(filter(countsTable.all.tidy, feature == "AS_tRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,50)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_tRNA")
+
+plot(dispersions(dds.AS_tRNA))
+```
+rRNA
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.rRNA <- filter(allCounts, feature == "rRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.rRNA <- as.data.frame(row.names = colnames(countsTable.rRNA), condition.all)
+dds.rRNA <- DESeqDataSetFromMatrix(countData = countsTable.rRNA, colData = coldata.rRNA, design = ~ condition.all)
+dds.rRNA <- DESeq(dds.rRNA)
+colSums(countsTable.rRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+rRNA.SizeFactors <- as.data.frame(sizeFactors(dds.rRNA)) 
+cond.samp = rownames(rRNA.SizeFactors)
+rRNA.SizeFactors <- rRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+rRNA.SeqDepth <- as.data.frame(colSums(countsTable.rRNA)) %>% mutate (cond.samp = cond.samp)
+
+rRNA.Q3 <- as.data.frame(t(countsTable.rRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(rRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.rRNA <- inner_join(rRNA.Q3, inner_join(rRNA.SizeFactors, rRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.rRNA = sizeFactors(dds.rRNA), 
+         sequencingDepth.rRNA = colSums(countsTable.rRNA),
+         Q3.rRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.rRNA, sequencingDepth.rRNA, Q3.rRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.rRNA, aes(x = sequencingDepth.rRNA, y = sizeFactors.rRNA, col = cond.samps)) + geom_point()
+
+ggplot(data = seqDepth.sizeFactors.rRNA, aes(x = Q3.rRNA, y = sizeFactors.rRNA, col = cond.samps)) + geom_point()
+
+summary.rRNA <- filter(countsTable.all.tidy, feature == "rRNA", cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE) %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount))
+summary.rRNA <- inner_join(summary.rRNA, seqDepth.sizeFactors.rRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+toplot.rRNA <- filter(countsTable.all.tidy, feature == "rRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "rRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("rRNA")
+ggplot(filter(countsTable.all.tidy, feature == "rRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,200)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("rRNA")
+
+plot(dispersions(dds.rRNA))
+```
+AS_rRNA
+normalize
+```{r, echo=F, message=F, warning=F}
+countsTable.AS_rRNA <- filter(allCounts, feature == "AS_rRNA") %>% select(`0.00_A`, `0.00_B`, `0.00_C`, `0.35_A`, `0.35_B`, `0.35_C`, `11.59_A`, `11.59_B`, `11.59_C`, `20.40_A`,  `20.40_B`,  `20.40_C`, `48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+coldata.AS_rRNA <- as.data.frame(row.names = colnames(countsTable.AS_rRNA), condition.all)
+dds.AS_rRNA <- DESeqDataSetFromMatrix(countData = countsTable.AS_rRNA, colData = coldata.AS_rRNA, design = ~ condition.all)
+dds.AS_rRNA <- DESeq(dds.AS_rRNA)
+colSums(countsTable.AS_rRNA)
+```
+analyse
+```{r, echo=F, message=F, warning=F}
+#with 100 removed
+AS_rRNA.SizeFactors <- as.data.frame(sizeFactors(dds.AS_rRNA)) 
+cond.samp = rownames(AS_rRNA.SizeFactors)
+AS_rRNA.SizeFactors <-AS_rRNA.SizeFactors %>%
+  mutate(cond.samp = cond.samp)
+#with 100 removed
+AS_rRNA.SeqDepth <- as.data.frame(colSums(countsTable.AS_rRNA)) %>% mutate (cond.samp = cond.samp)
+
+AS_rRNA.Q3 <- as.data.frame(t(countsTable.AS_rRNA %>%
+  summarize(`0.00_A` = quantile(`0.00_A`, 0.75),
+            `0.00_B` = quantile(`0.00_B`, 0.75),
+            `0.00_C` = quantile(`0.00_C`, 0.75),
+            `0.35_A` = quantile(`0.35_A`, 0.75),
+            `0.35_B` = quantile(`0.35_B`, 0.75),
+            `0.35_C` = quantile(`0.35_C`, 0.75),
+            `11.59_A` = quantile(`11.59_A`, 0.75),
+            `11.59_B` = quantile(`11.59_B`, 0.75),
+            `11.59_C` = quantile(`11.59_C`, 0.75),
+            `20.40_A` = quantile(`20.40_A`, 0.75),
+            `20.40_B` = quantile(`20.40_B`, 0.75),
+            `20.40_C` = quantile(`20.40_C`, 0.75),
+            `48.37_A` = quantile(`48.37_A`, 0.75),
+            `48.37_B` = quantile(`48.37_B`, 0.75),
+            `48.37_C` = quantile(`48.37_C`, 0.75),
+            `129.96_A` = quantile(`129.96_A`, 0.75),
+            `129.96_B` = quantile(`129.96_B`, 0.75),
+            `129.96_C` = quantile(`129.96_C`, 0.75),
+            `190.38_A` = quantile(`190.38_A`, 0.75),
+            `190.38_B` = quantile(`190.38_B`, 0.75),
+            `190.38_C` = quantile(`190.38_C`, 0.75))))%>%
+  mutate(cond.samp = cond.samp)
+colnames(AS_rRNA.Q3) = c("Q3", "cond.samp")
+
+seqDepth.sizeFactors.AS_rRNA <- inner_join(AS_rRNA.Q3, inner_join(AS_rRNA.SizeFactors, AS_rRNA.SeqDepth,by = "cond.samp"), by = "cond.samp") %>%
+  mutate(sizeFactors.AS_rRNA = sizeFactors(dds.AS_rRNA), 
+         sequencingDepth.AS_rRNA = colSums(countsTable.AS_rRNA),
+         Q3.AS_rRNA = Q3,
+         cond.samps = cond.samp) %>%
+  select(cond.samp, sizeFactors.AS_rRNA, sequencingDepth.AS_rRNA, Q3.AS_rRNA, cond.samps) %>%
+  separate(cond.samp, c("condition", "sample"), sep = "_")
+
+ggplot(data = seqDepth.sizeFactors.AS_rRNA, aes(x = Q3.AS_rRNA, y = sizeFactors.AS_rRNA, col = cond.samps), size = 3) + geom_point()
+
+summary.AS_rRNA <- filter(countsTable.all.tidy, feature == "AS_rRNA", cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE) %>% group_by(cond.samps) %>% summarise(min = min(rawCount), Q1 = quantile(rawCount, .25), median = median(rawCount), Q3 = quantile(rawCount, .75), max = max(rawCount))
+summary.AS_rRNA <- inner_join(summary.AS_rRNA, seqDepth.sizeFactors.AS_rRNA, by = "cond.samps") %>% arrange(as.numeric(condition))
+
+ggplot(data = summary.AS_rRNA, aes(x = median, y = sizeFactors.AS_rRNA, col = cond.samps)) + geom_point()
+
+toplot.AS_rRNA <- filter(countsTable.all.tidy, feature == "AS_rRNA") %>%
+  filter(cond.samps %in% c("0.00_A", "0.00_B", "0.00_C", "0.35_A", "0.35_B", "0.35_C", 
+         "11.59_A", "11.59_B", "11.59_C", "20.40_A", "20.40_B", "20.40_C", 
+         "48.37_A", "48.37_B", "48.37_C", "129.96_A", "129.96_B", "129.96_C", 
+         "190.38_A", "190.38_B", "190.38_C"))
+
+ggplot(filter(countsTable.all.tidy, feature == "AS_rRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_rRNA")
+ggplot(filter(countsTable.all.tidy, feature == "AS_rRNA"), aes(x = cond.samps, y = rawCount)) + geom_boxplot() + coord_cartesian(ylim = c(0,10)) + theme(axis.text.x = element_text(angle = 60, hjust = 1)) + ggtitle("AS_rRNA")
+
+plot(dispersions(dds.AS_rRNA))
+
+allCounts %>%
+  group_by(feature) %>%
+  summarize()
+```
+
+regulated.only
+```{r, echo=F, message=F, warning=F}
+boxplot(rawCount ~ cond.samps, data = filter(countsTable.all.tidy, cond.samps %in% c("100.00_A", "100.00_B", "100.00_C") == FALSE, Geneid %in% regulated.tidy$Geneid), ylim = c(0, 300), main = "All Regions Raw Counts Regulated")
+```
+A lot of the low count genes are filtered out of the differentially expressed genes 0% vs 100%.
+
+#D.E. SORTING INTO PROFILES
+Of the regulated genes, find the ones which are differentially expressed from 0% to 11.59%
+```{r}
+# compare 0 to 0.1159
+countsTable.0.1159 <- allCounts %>%
+  select(Geneid, genename, `0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`) %>%
+  filter(Geneid %in% regulated.genes$Geneid)
+# define conditions
+condition.0.1159 <- as.factor(c("0.00", "11.59","0.00", "11.59", "0.00", "11.59"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable.0.1159)) %>%
+  filter(endsWith(colnames(countsTable.0.1159), "A") 
+         | endsWith(colnames(countsTable.0.1159), "B") 
+         | endsWith(colnames(countsTable.0.1159),"C"))
+coldata.0.1159 <- data.frame(row.names = colnames(countsTable.0.1159)[3:8], condition.0.1159)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw.0.1159 <- countsTable.0.1159 %>%
+  select(`0.00_A`, `11.59_A`,`0.00_B`, `11.59_B`, `0.00_C`, `11.59_C`)
+rownames(countsRaw.0.1159) = countsTable.0.1159$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0.1159 <- DESeqDataSetFromMatrix(countData = countsRaw.0.1159, colData = coldata.0.1159, design = ~condition.0.1159)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.0.1159 <- DESeq(cds.0.1159)
+#estimating dispersion by treating samples as replicates
+#get results
+results.0.1159 <- results(cds.0.1159, alpha = 0.05)
+summary(results.0.1159)
+```
+
+
+#CORRELATION SORTING INTO PROFILES
+make correlations
+```{r, echo=F, message=F, warning=F}
+# profiles - made up
+profile.linear.pos <- c(0,0,0, 0.0035,0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040,0.2040, 0.4837,0.4837,0.4837, 1,1,1, 1,1,1)
+profile.linear.neg <- c(1,1,1, 0.9965,0.9965,0.9965, 0.8841,0.8841,0.8841, 0.7960,0.7960,0.7960, 0.5163,0.5163,0.5163, 0,0,0, 0,0,0)
+profile.sens.pos <- c(0,0,0, 0,0,0, 0.9,0.9,0.9, 0.9,0.9,0.9, 0.9,0.9,0.9, 1,1,1, 1,1,1)
+profile.sens.neg <- c(1,1,1, 1,1,1, 0.1,0.1,0.1, 0.1,0.1,0.1, 0.1,0.1,0.1, 0,0,0, 0,0,0)
+profile.insens.pos <- c(0,0,0, 0,0,0, 0.1,0.1,0.1, 0.1,0.1,0.1, 0.1,0.1,0.1, 1,1,1, 1,1,1)
+profile.insens.neg <- c(1,1,1, 1,1,1, 0.9,0.9,0.9, 0.9,0.9,0.9, 0.9,0.9,0.9, 0,0,0, 0,0,0)
+
+profile.6 <- data.frame(sens.pos = profile.sens.pos, sens.neg = profile.sens.neg, insens.pos = profile.insens.pos, insens.neg = profile.insens.neg, linear.pos = profile.linear.pos, linear.neg = profile.linear.neg)
+
+normCounts <- regulated.tidy %>%
+  select(Geneid, nlevel, sample, normCount) %>%
+  unite(nlevel.sample, nlevel, sample) %>%
+  reshape2::dcast(nlevel.sample ~ Geneid, value.var = "normCount") %>%
+  select(-1)
+
+profile.normCounts <- as.data.frame(t(cor(profile.6, normCounts)))
+rownames <- rownames(profile.normCounts)
+rowMax <- rowMax(as.matrix(profile.normCounts))
+profile.normCounts <- profile.normCounts %>%
+  mutate(Geneid = rownames,
+         maxCorr = rowMax,
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+```
+```{r, echo=F, message=F, warning=F}
+# profiles: extrapolated from profiles exploratorily used on 
+profile.linear.pos <- c(0,0,0, 0.0035,0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040,0.2040, 0.4837,0.4837,0.4837, 1,1,1, 1,1,1)
+profile.linear.neg <- c(1,1,1, 0.9965,0.9965,0.9965, 0.8841,0.8841,0.8841, 0.7960,0.7960,0.7960, 0.5163,0.5163,0.5163, 0,0,0, 0,0,0)
+profile.sens.pos <- c(0,0,0, 0,0,0, 0.4,0.4,0.4, 0.71,0.71,0.71, 0.93,0.93,0.93, 1,1,1, 1,1,1)
+profile.sens.neg <- c(1,1,1, 1,1,1, 0.6,0.6,0.6, 0.29,0.29,0.29, 0.07,0.07,0.07, 0,0,0, 0,0,0)
+profile.insens.pos <- c(0,0,0, 0,0,0, 0.04,0.04,0.04, 0.08,0.08,0.08, 0.37,0.37,0.37, 1,1,1, 1,1,1)
+profile.insens.neg <- c(1,1,1, 1,1,1, 0.96,0.96,0.96, 0.92,0.92,0.92, 0.63,0.63,0.63, 0,0,0, 0,0,0)
+
+profile.6 <- data.frame(sens.pos = profile.sens.pos, sens.neg = profile.sens.neg, insens.pos = profile.insens.pos, insens.neg = profile.insens.neg, linear.pos = profile.linear.pos, linear.neg = profile.linear.neg)
+
+normCounts <- regulated.tidy %>%
+  select(Geneid, nlevel, sample, normCount) %>%
+  unite(nlevel.sample, nlevel, sample) %>%
+  reshape2::dcast(nlevel.sample ~ Geneid, value.var = "normCount") %>%
+  select(-1)
+
+profile.normCounts <- as.data.frame(t(cor(profile.6, normCounts)))
+rownames <- rownames(profile.normCounts)
+rowMax <- rowMax(as.matrix(profile.normCounts))
+profile.normCounts <- profile.normCounts %>%
+  mutate(Geneid = rownames,
+         maxCorr = rowMax,
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+```
+divide regulated genes and counts into the 6 profile groups
+```{r, echo=F, message=F, warning=F}
+corr.sens.pos <- profile.normCounts %>%
+  filter(group == "sens.pos") 
+corr.sens.pos.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.sens.pos$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.sens.pos)
+ 
+corr.sens.neg <- profile.normCounts %>%
+  filter(group == "sens.neg") 
+corr.sens.neg.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.sens.neg$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.sens.neg)
+
+corr.insens.pos <- profile.normCounts %>%
+  filter(group == "insens.pos") 
+corr.insens.pos.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.insens.pos$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.insens.pos)
+
+corr.insens.neg <- profile.normCounts %>%
+  filter(group == "insens.neg") 
+corr.insens.neg.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.insens.neg$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.insens.neg)
+
+corr.linear.pos <- profile.normCounts %>%
+  filter(group == "linear.pos") 
+corr.linear.pos.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.linear.pos$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.linear.pos)
+
+corr.linear.neg <- profile.normCounts %>%
+  filter(group == "linear.neg") 
+corr.linear.neg.counts <- regulated.tidy %>%
+  filter(Geneid %in% corr.linear.neg$Geneid) %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile.linear.neg)
+```
+look at correlations by category
+```{r, echo=F, message=F, warning=F}
+profile.normCounts.tidy <- inner_join(profile.normCounts, regulated.genes, by = "Geneid") %>%
+  select(sens.pos, sens.neg, insens.pos, insens.neg, linear.pos, linear.neg, maxCorr, Geneid, myProfile = group)
+
+profile.normCounts.tidy <- profile.normCounts.tidy %>%
+  gather(profile, correlation, -Geneid, -maxCorr, -myProfile) %>%
+  filter(profile != "profile") %>%
+  group_by(Geneid) %>%
+  mutate(profile = profile) %>%
+  ungroup()
+
+profile.normCounts.tidy.sens.pos <- filter(profile.normCounts.tidy, myProfile == "sens.pos")
+ggplot(data = profile.normCounts.tidy.sens.pos, aes(x = profile, y = correlation, col = Geneid)) + geom_point() + geom_line(data = profile.normCounts.tidy.sens.pos, aes(y = correlation))
+```
+The Bests
+We can filter out the genes that correlate the most highly with the different profiles and which have a certain standard of differentiability. I was rougly going by the thrid quartile for each of these (strength of correlation and differentiability from linear shape), but this is pretty ad hoc.
+```{r, echo=F, message=F, warning=F}
+summary(corr.sens.pos$maxCorr)
+summary(corr.sens.pos$sens.pos - corr.sens.pos$linear.pos)
+best.sens.pos <- filter(corr.sens.pos, maxCorr > 0.7, sens.pos - linear.pos > .15, sens.pos - insens.pos > .15)
+best.sens.pos.counts <- filter(corr.sens.pos.counts, Geneid %in% best.sens.pos$Geneid)
+ggplot(data = best.sens.pos.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point(pch = 21) + geom_line(data = best.sens.pos.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.sens.pos.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,2)) + ggtitle(paste(length(best.sens.pos.counts$genename)/21, "genes with >0.7 correlated and >0.15 difference between other profiles"))
+
+summary(corr.sens.neg$maxCorr)
+summary(corr.sens.neg$maxCorr - corr.sens.neg$linear.neg)
+best.sens.neg <- filter(corr.sens.neg, maxCorr > 0.70, sens.neg - linear.neg > 0.2, sens.neg - insens.neg > 0.2)
+best.sens.neg.counts <- filter(corr.sens.neg.counts, Geneid %in% best.sens.neg$Geneid)
+ggplot(data = best.sens.neg.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = best.sens.neg.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.sens.neg.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(best.sens.neg.counts$Geneid)/21, ">.70 corr and >.2 diff sensitive Neg Genes"))
+
+summary(corr.insens.pos$maxCorr)
+summary(corr.insens.pos$maxCorr - corr.insens.pos$linear.pos)
+best <- filter(corr.insens.pos, corr.insens.pos$maxCorr > .7, insens.pos - linear.pos > 1.190e-02, insens.pos - sens.pos > 1.190e-02)
+best.counts <- filter(corr.insens.pos.counts, Geneid %in% best$Geneid)
+ggplot(data = best.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = best.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.counts, aes(y = profile, col = "insens.pos"), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(best.counts$Geneid)/21, "genes with > 0.7 correlation and >0.2 different from other profiles"))
+
+summary(corr.insens.neg$insens.neg)
+summary(corr.insens.neg$insens.neg - corr.insens.neg$linear.neg)
+best <- filter(corr.insens.neg, insens.neg > .7, insens.neg - linear.neg > .02, insens.neg  - sens.neg > .02)
+best.counts <- filter(corr.insens.neg.counts, Geneid %in% best$Geneid)
+ggplot(data = best.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = best.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.counts, aes(y = profile, col = "insens.neg"), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(best.counts$Geneid)/21, "genes with > 0.7 correlation and >0.02 different from other profiles")) + xlab("RpoS Level") + ylab("Normalized Gene Expression")
+
+summary(corr.linear.pos$linear.pos)
+summary(corr.linear.pos$linear.pos - corr.linear.pos$sens.pos)
+summary(corr.linear.pos$linear.pos - corr.linear.pos$insens.pos)
+best <- filter(corr.linear.pos, linear.pos > .7, linear.pos - insens.pos > 0.025, linear.pos  - sens.pos > 0.025)
+best.counts <- filter(corr.linear.pos.counts, Geneid %in% best$Geneid)
+ggplot(data = best.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = best.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(best.counts$Geneid)/21, "genes with > 0.7 correlation and >0.025 different from other profiles")) + xlab("RpoS Level") + ylab("Normalized Gene Expression")
+
+summary(corr.linear.neg$linear.neg)
+summary(corr.linear.neg$linear.neg - corr.linear.neg$sens.neg)
+summary(corr.linear.neg$linear.neg - corr.linear.neg$insens.neg)
+best <- filter(corr.linear.neg, linear.neg > .7, linear.neg - insens.neg > .025, linear.neg  - sens.neg > .025)
+best.counts <- filter(corr.linear.neg.counts, Geneid %in% best$Geneid)
+ggplot(data = best.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = best.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = best.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(best.counts$Geneid)/21, "genes with > 0.7 correlation and >0.025 different from other profiles")) + xlab("RpoS Level") + ylab("Normalized Gene Expression")
+```
+
+#Plotting all genes by profile
+Here we have plots of all genes by profile to which they are assigned without filtering out the "best" sortages. I also use plots below to explore wacky genes. 
+sens.pos
+```{r, echo=F, message=F, warning=F}
+# profile plot!
+ggplot(data = corr.insens.pos.counts, aes(x = nlevel, y = profile)) + geom_line(size = 1.5) + xlab("RpoS level") + ylab("Gene Expression") + ggtitle("Insensitive Positive Profile")
+
+ggplot(data = corr.sens.pos.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point(pch = 21) + geom_line(data = corr.sens.pos.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.sens.pos.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,2)) + ggtitle(paste(length(corr.sens.pos$Geneid), "Sensitive Positive Genes")) + xlab("RpoS level") + theme(legend.position = "none")
+
+```
+
+what's the distances between the corr values?
+```{r, echo=F, message=F, warning=F}
+summary(corr.sens.pos$maxCorr - corr.sens.pos$linear.pos)
+best<- filter(corr.sens.pos, corr.sens.pos$maxCorr - corr.sens.pos$linear.pos > 0.20, corr.sens.pos$maxCorr > .7)
+ggplot(data = filter(corr.sens.pos.counts, Geneid %in% best$Geneid), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point(pch = 21) + geom_line(data = filter(corr.sens.pos.counts, Geneid %in% best$Geneid), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(corr.sens.pos.counts, Geneid %in% best$Geneid), aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,2)) + ggtitle(paste(length(best$Geneid), "Sensitive Positive Genes")) + xlab("RpoS level")
+
+summary(best$sens.pos)
+```
+
+sens.neg
+```{r, echo=F, message=F, warning=F}
+ggplot(data = corr.sens.neg.counts, aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = corr.sens.neg.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.sens.neg.counts, aes(y = profile), col = "black") + theme(legend.position = "none") + coord_cartesian(ylim = c(0,2)) +  ggtitle(paste(length(corr.sens.neg$Geneid), "Sensitive Neg Genes"))
+
+```
+Weird sens.neg genes
+
+insens.pos
+```{r, echo=F, message=F, warning=F}
+ggplot(data = corr.insens.pos.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = corr.insens.pos.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.insens.pos.counts, aes(y = profile, col = "insens.pos"), col = "black") + coord_cartesian(ylim = c(0,2)) +  ggtitle(paste(length(corr.insens.pos$Geneid), "Insensitive Positive Genes")) + theme(legend.position = "none")
+```
+insens.neg
+```{r, echo=F, message=F, warning=F}
+ggplot(data = corr.insens.neg.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = corr.insens.neg.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.insens.neg.counts, aes(y = profile), col = "black") + coord_cartesian(ylim = c(0,2)) + xlab("RpoS level") + ggtitle(paste(length(corr.insens.neg$Geneid), "Insensitive Neg Genes"))
+
+```
+linear.pos
+```{r, echo=F, message=F, warning=F}
+ggplot(data = corr.linear.pos.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = corr.linear.pos.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.linear.pos.counts, aes(y = profile, col = "insens.pos"), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(corr.linear.pos$Geneid), "Linear Positive Genes")) + theme(legend.position = "none") + xlab("RpoS level")
+```
+linear.neg
+```{r, echo=F, message=F, warning=F}
+ggplot(data = corr.linear.neg.counts, aes(x = nlevel, y = normCountScaled, col = Geneid)) + geom_point() + geom_line(data = corr.linear.neg.counts, aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.linear.neg.counts, aes(y = profile, col = "insens.pos"), col = "black") + coord_cartesian(ylim = c(0,1.5)) +  ggtitle(paste(length(corr.linear.neg$Geneid), "Linear Negative Genes")) + theme(legend.position = "none") + xlab("RpoS level")
+```
+
+
+# Comparison to Old Findings (Dr. Stoebel et al)
+normalize just the AS_CDS and CDS genes
+```{r, echo=F, message=F, warning=F}
+allCounts.toCompare <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) %>%
+  select(-(1:2)) # just select feature name, genename, and all counts
+# sum the AS_CDS and CDS rows
+allCounts.toCompare <- aggregate(allCounts.toCompare[1:24], by = list(genename = allCounts.toCompare$genename), FUN = sum)
+```
+All-way normalization to get normalized counts and "regulated" genes
+```{r, echo=F, message=F, warning=F}
+# get normalized counts and DESeq across all groups
+rawCounts.toComprare <- allCounts.toCompare %>%
+  select(`0.00_A`, `0.00_B`, `0.00_C`, 
+         `0.35_A`, `0.35_B`, `0.35_C`, 
+         `11.59_A`, `11.59_B`, `11.59_C`, 
+         `20.40_A`, `20.40_B`, `20.40_C`, 
+         `48.37_A`, `48.37_B`, `48.37_C`, 
+         `129.96_A`, `129.96_B`, `129.96_C`, 
+         `190.38_A`, `190.38_B`, `190.38_C`)
+# define conditions
+condition.toCompare <- as.factor(c("0.00", "0.00", "0.00", "0.35", "0.35", "0.35", "11.59", "11.59", "11.59", "20.40",  "20.40",  "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", "129.96", "190.38", "190.38", "190.38"))
+coldata.toCompare <- as.data.frame(row.names =  colnames(rawCounts.toComprare), condition.toCompare)
+cds.toCompare <- DESeqDataSetFromMatrix(countData = rawCounts.toComprare, colData = coldata.toCompare, design = ~condition.toCompare)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.toCompare <- DESeq(cds.toCompare)
+results.toCompare <- results(cds.toCompare)
+
+# get normalized counts
+normCounts.toCompare <- as.data.frame(counts(cds.toCompare, normalized = TRUE)) %>%
+  mutate(genename = allCounts.toCompare$genename)
+```
+make AS_CDS, CDS summed correlations and find "regulated" genes.
+```{r, echo=F, message=F, warning=F}
+# find "regulated" genes when we sum AS_CDS and CDS rows
+comparisonTable.0.190.38 <- allCounts.toCompare %>%
+  select(`0.00_A`, `190.38_A`,`0.00_B`, `190.38_B`, `0.00_C`, `190.38_C`)
+# define conditions
+condition.0.190.38 <- as.factor(c("0.00", "190.38","0.00", "190.38", "0.00", "190.38"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = rownames(comparisonTable.0.190.38)
+coldata.comparison.0.190.38 <- data.frame(row.names = colnames(comparisonTable.0.190.38), condition.0.190.38)
+# create the DESeqDataSet. cds stands for "count data set"
+cds.comparison.0.190.38 <- DESeqDataSetFromMatrix(countData = comparisonTable.0.190.38, colData = coldata.comparison.0.190.38, design = ~condition.0.190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+cds.comparison.0.190.38 <- DESeq(cds.comparison.0.190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results.comparison.0.190.38 <- results(cds.comparison.0.190.38, alpha = 0.05)
+summary(results.comparison.0.190.38)
+
+regulated.toCompare <- data.frame(padj.0.190.38 = results.comparison.0.190.38$padj, genename = allCounts.toCompare$genename) %>%
+  filter(padj.0.190.38 < 0.05)
+```
+```{r, eval=FALSE, message=F, warning=F, include=FALSE}
+#Or with 129%
+# find "regulated" genes when we sum AS_CDS and CDS rows
+#comparisonTable.0.129.96 <- allCounts.toCompare %>%
+  #select(`0.00_A`, `129.96_A`,`0.00_B`, `129.96_B`, `0.00_C`, `129.96_C`)
+# define conditions
+#condition.0.129.96 <- as.factor(c("0.00", "129.96","0.00", "129.96", "0.00", "129.96"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+#rownames = rownames(comparisonTable.0.129.96)
+#coldata.comparison.0.129.96 <- data.frame(row.names = colnames(comparisonTable.0.129.96), condition.0.129.96)
+# create the DESeqDataSet. cds stands for "count data set"
+#cds.comparison.0.129.96 <- DESeqDataSetFromMatrix(countData = comparisonTable.0.129.96, colData = coldata.comparison.0.129.96, design = ~condition.0.129.96)
+# estimate size factors, dispersions, etc, and testing differential expression
+#cds.comparison.0.129.96 <- DESeq(cds.comparison.0.129.96)
+#estimating dispersion by treating samples as replicates
+
+#get results
+#results.comparison.0.129.96 <- results(cds.comparison.0.129.96, alpha = 0.05)
+#summary(results.comparison.0.129.96)
+
+#regulated.toCompare <- data.frame(padj.0.129.96 = results.comparison.0.129.96$padj, genename = allCounts.toCompare$genename) %>%
+  #filter(padj.0.129.96 < 0.05)
+````
+join regulated genes and padj values with normalized counts and make tidy data
+```{r, echo=F, message=F, warning=F}
+regulated.toCompare <- left_join(regulated.toCompare, normCounts.toCompare, by = c("genename")) %>%
+  group_by(genename) %>%
+  mutate(slope = ifelse(mean(cbind(`0.00_A`, `0.00_B`, `0.00_C`)) < mean(cbind(`190.38_A`, `190.38_B`, `190.38_C`)), "positive", "negative"))
+         #weird_129.96 = ifelse(slope == "positive",
+                          #     ifelse(mean(cbind(`100.00_A`, `100.00_B`, `100.00_C`)) > mean(c(`129.96_A`,`129.96_B`,`129.96_C`)), TRUE, FALSE),
+                               #slope == "negative"
+                             # ifelse(mean(cbind(`100.00_A`, `100.00_B`, `100.00_C`)) < mean(c(`129.96_A`,`129.96_B`,`129.96_C`)), TRUE, FALSE)))
+
+```
+
+compare to old regulated genes found with old data
+```{r, echo=F, message=F, warning=F}
+matchup <- inner_join(regulated.toCompare, NonBonferroniRegulatedGenesOld, by = "genename")
+nomatchup <- anti_join(NonBonferroniRegulatedGenesOld, regulated.toCompare, by = "genename")
+```
+0% vs 190% --- 795 genes match up (1350 in old (58.9%), 1268 in new (62.3%))
+0% vs 129% --- 533 genes match up (1350 in old (39.5%), 1268 in new (42.0%))
+
+0.00old vs 0.00new comparison
+```{r, echo=F, message=F, warning=F}
+comparisonTable <- left_join(allCounts.toCompare, allCounts_old, by = "genename")
+
+comparisonTable.0 <- comparisonTable %>%
+  select(ko1, ko2, A0 = `0.00_A`, B0 = `0.00_B`, C0 = `0.00_C`) %>%
+  na.omit()
+  
+# define conditions
+condition.0 <- as.factor(c("ko.old", "ko.old","ko.new", "ko.new", "ko.new"))
+#define col data
+coldata.0 <- as.data.frame(row.names =  colnames(comparisonTable.0), condition.0)
+# create the DESeqDataSet. cds stands for "count data set"
+cds.0 <- DESeqDataSetFromMatrix(countData = comparisonTable.0, colData = coldata.0, design = ~condition.0)
+cds.0 <- DESeq(cds.0)
+
+#get results
+results.0 <- results(cds.0, alpha = .05)
+summary(results.0)
+
+results.0 <- as.data.frame(results.0) %>% mutate(genename = comparisonTable$genename)
+regulated.DE <- inner_join(regulated.toCompare, results.0) %>%
+  filter(padj < 0.05) 
+length(regulated.DE$genename)
+```
+1378/4273 (32.2%) genes are differentially expressed between 0%old and 0%new. For regulated genes, 590/1301 (45.3%) are differentially expressed between 0%old and 0%new. This is all done looking at the sums of AS_CDS and CDS rows, and normalizing {ko1, ko2, 0.00A, 0.00B, 0.00C} (where ko1 and ko2 are the old data, and 0.00A,B,C are the new data). 
+```{r, echo=F, message=F, warning=F}
+comparisonTable.100 <- comparisonTable %>%
+  select(wt1, wt2, A0 = `100.00_A`, B0 = `100.00_B`, C0 = `100.00_C`)
+  
+# define conditions
+condition.100 <- as.factor(c("wt.old", "wt.old","wt.new", "wt.new", "wt.new"))
+#define col data
+coldata.100 <- as.data.frame(row.names =  colnames(comparisonTable.100), condition.100)
+# create the DESeqDataSet. cds stands for "count data set"
+cds.100 <- DESeqDataSetFromMatrix(countData = comparisonTable.100, colData = coldata.100, design = ~condition.100)
+cds.100 <- DESeq(cds.100)
+
+#get results
+results.100 <- results(cds.100, alpha = .05)
+summary(results.100)
+
+results.100 <- as.data.frame(results.100) %>% mutate(genename = comparisonTable$genename)
+regulated.DE <- inner_join(regulated.toCompare, results.100) %>%
+  filter(padj < 0.05) 
+length(regulated.DE$genename)
+```
+2080/4273 (48.7%) genes are differentially expressed between 100%old and 100%new. For regulated genes, 800/1301 (61.5%) are differentially expressed between 100%old and 100%new. This is all done looking at the sums of AS_CDS and CDS rows, and normalizing {wt1, wt2, 100.00A, 100.00B, 100.00C} (where wt1 and wt2 are the old data, and 100.00A,B,C are the new data). 
+
+I think this data would suggest that we should not overlap the datasets. 
+
+##We do correlation analysis on the new-found regulated genes
+We also compare with the results found with the old data. 
+```{r, echo=F, message=F, warning=F}
+# make tidy data
+regulated.toCompare.tidy <- regulated.toCompare %>%
+  gather(nlevel, normCount, `0.00_A`:`190.38_C`) %>%
+  separate(nlevel, c("nlevel", "sample"), sep = "[_]") %>%
+  mutate(nlevel = as.numeric(nlevel)/100) %>%
+  arrange(genename) %>%
+  group_by(genename, nlevel) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(genename) %>%
+  mutate(scaler = ifelse(slope == "positive", levelMean[16], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() %>%
+  group_by(nlevel) %>%
+  ungroup()
+
+normCounts <- regulated.toCompare.tidy %>%
+  select(genename, nlevel, sample, normCount) %>%
+  unite(nlevel.sample, nlevel, sample) %>%
+  reshape2::dcast(nlevel.sample ~ genename, value.var = "normCount") %>%
+  select(-1)
+
+profile.normCounts <- as.data.frame(t(cor(profile.6, normCounts)))
+rownames <- rownames(profile.normCounts)
+rowMax <- rowMax(as.matrix(profile.normCounts))
+profile.normCounts <- profile.normCounts %>%
+  mutate(genename = rownames,
+         maxCorr = rowMax,
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+```
+make groups (new)
+```{r, echo=F, message=F, warning=F}
+corr.sens.pos <- profile.normCounts %>%
+  filter(group == "sens.pos") 
+corr.sens.pos.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.sens.pos$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.sens.pos)
+ 
+corr.sens.neg <- profile.normCounts %>%
+  filter(group == "sens.neg") 
+corr.sens.neg.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.sens.neg$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.sens.neg)
+
+corr.insens.pos <- profile.normCounts %>%
+  filter(group == "insens.pos") 
+corr.insens.pos.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.insens.pos$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.insens.pos)
+
+corr.insens.neg <- profile.normCounts %>%
+  filter(group == "insens.neg") 
+corr.insens.neg.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.insens.neg$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.insens.neg)
+
+corr.linear.pos <- profile.normCounts %>%
+  filter(group == "linear.pos") 
+corr.linear.pos.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.linear.pos$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.linear.pos)
+
+corr.linear.neg <- profile.normCounts %>%
+  filter(group == "linear.neg") 
+corr.linear.neg.counts <- regulated.toCompare.tidy %>%
+  filter(genename %in% corr.linear.neg$genename) %>%
+  group_by(genename) %>%
+  mutate(profile = profile.linear.neg)
+```
+make groups (old)
+```{r, echo=F, message=F, warning=F}
+old.sens.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "sensitive")
+old.sens.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "sensitive")
+old.insens.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "insensitive")
+old.insens.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "insensitive")
+old.linear.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "linear")
+old.linear.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "linear")
+```
+make bests and compare
+```{r, echo=F, message=F, warning=F}
+best.sens.pos <- filter(corr.sens.pos, maxCorr > .7)
+#, sens.pos - linear.pos > .1 , sens.pos - insens.neg > .1)
+
+matchup <- inner_join(old.sens.pos, best.sens.pos, by = "genename")
+match.counts <- filter(corr.sens.pos.counts, genename %in% matchup$genename)
+
+ggplot(data = filter(corr.sens.pos.counts, genename %in% best.sens.pos$genename), aes(x = nlevel, y = normCountScaled,  col = genename)) + geom_point() + geom_line(data = filter(corr.sens.pos.counts, genename %in% best.sens.pos$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = corr.sens.pos.counts, aes(y = profile), col = "black", size = 1.5) + ggtitle(paste(length(best.sens.pos$genename), "genes > 0.7 correlation with Sensitive Positive "))
+
+ggplot(data = filter(corr.sens.pos.counts, genename %in% matchup$genename), aes(x = nlevel, y = normCountScaled,  col = genename)) + geom_point() + geom_line(data = filter(corr.sens.pos.counts, genename %in% matchup$genename), aes(y = meanScaled)) + geom_line(data = corr.sens.pos.counts, aes(y = profile), col = "black") + ggtitle(paste(length(matchup$genename), "Best Sens Pos matchup with Old Sens Pos"))
+```
+explore
+```{r, echo=F, message=F, warning=F}
+summary(corr.linear.neg$maxCorr)
+
+
+old.found <- anti_join(old.sens.pos, corr.sens.pos, by = "genename")
+old.found <- inner_join(old.found, profile.normCounts, by = "genename")
+old.found %>%
+  group_by(group) %>%
+  summarise(count = n())
+
+old.found <- filter(old.found, group == "insens.pos")
+
+old.found.counts <- filter(regulated.toCompare.tidy, genename %in% old.found$genename)
+
+ggplot(data = old.found.counts, aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = old.found.counts, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(old.found$genename), "Old found Sensitive Positive; corr found insensitive positive"))  
+
+summary(old.found$insens.pos - old.found$linear.pos)
+```
+
+# Profile Assignment, PAM Clustering, and K-means Clustering on Filtered Data
+We are deciding to remove the samples with third quartiles below 10 raw counts: 0.00_B which has a median of 1 and third quartile of 4 raw counts, 0.35_B which has a median of 1 and third quartile of 3 raw counts, and 20.40_A which has a median of 2 and third quartile of 8 raw counts. We also remove any rows whose maximum raw count is less than 5 (this constitutes 25% of the genes!) We then re-normalize the allCounts raw read data set with those columns and rows removed.
+```{r, echo=F, message=F, warning=F}
+# keep only genes whose maximum raw count is greater than 5 and exclude the samples `0.00_B`, `0.35_B`, and `20.40_A` whose Q3's are below 10. We also exclude the samples with condition 100% since these are a different strain of E. Coli
+allCounts.tidy.filtered <- countsTable.all.tidy %>% group_by(Geneid) %>%
+  filter(max(rawCount) > 5) %>% filter(cond.samps %in% c("0.00_B", "0.35_B", "20.40_A", "100.00_A", "100.00_B", "100.00_C") == FALSE)
+
+# create wide, messy version of this which DESeq2 needs. Filter out the unwanted columns but not the unwanted rows; we're going to need these for normalization
+allCounts.filtered <- allCounts %>% select(Geneid, feature, `0.00_A`, `0.00_C`,
+         `0.35_A`, `0.35_C`, 
+         `11.59_A`, `11.59_B`, `11.59_C`, 
+         `20.40_B`, `20.40_C`, 
+         `48.37_A`, `48.37_B`, `48.37_C`, 
+         `129.96_A`, `129.96_B`, `129.96_C`, 
+         `190.38_A`, `190.38_B`, `190.38_C`)
+
+allCounts.filtered.justCounts <- allCounts.filtered %>% select(`0.00_A`, `0.00_C`, 
+ `0.35_A`, `0.35_C`,  `11.59_A`, `11.59_B`, `11.59_C`, `20.40_B`, `20.40_C`, 
+`48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`,  
+`190.38_A`, `190.38_B`, `190.38_C`)
+
+condition.filtered <- as.factor(c("0.00", "0.00", "0.35", "0.35", "11.59", "11.59", "11.59", "20.40", "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", "129.96", "190.38", "190.38", "190.38"))
+
+coldata.filtered <- as.data.frame(row.names =  colnames(allCounts.filtered.justCounts), condition.filtered)
+dds.filtered <- DESeqDataSetFromMatrix(countData = allCounts.filtered.justCounts, colData = coldata.filtered, design = ~condition.filtered)
+# estimate size factors, dispersions, etc, and testing differential expression
+dds.filtered <- DESeq(dds.filtered)
+
+# get normalized counts
+normCounts.filtered <- as.data.frame(counts(dds.filtered, normalized = TRUE)) %>%
+  dplyr::rename(norm0.00_A = `0.00_A`, norm0.00_C = `0.00_C`, norm0.35_A = `0.35_A`, norm0.35_C = `0.35_C`, norm11.59_A = `11.59_A`, norm11.59_B = `11.59_B`, norm11.59_C = `11.59_C`, norm20.40_B = `20.40_B`,norm20.40_C = `20.40_C`, norm48.37_A = `48.37_A`,  norm48.37_B = `48.37_B`, norm48.37_C = `48.37_C`, norm129.96_A = `129.96_A`, norm129.96_B = `129.96_B`, norm129.96_C = `129.96_C`, norm190.38_A = `190.38_A`, norm190.38_B = `190.38_B`, norm190.38_C = `190.38_C`)
+# append normalized counts to wide, messy allCounts.filtered.
+# ALSO FILTER TO REMOVE THE GENES WHOSE MAX RAW COUNT WAS LESS THAN 5
+allCounts.filtered <- cbind(allCounts.filtered, normCounts.filtered) %>% 
+  filter(Geneid %in% allCounts.tidy.filtered$Geneid) 
+  #these are the genes whose max raw count was less than 5
+
+#get tidy normalized counts
+normCounts.tidy.filtered <- allCounts.filtered %>% select(Geneid, norm0.00_A, norm0.00_C, norm0.35_A, norm0.35_C, norm11.59_A, norm11.59_B, norm11.59_C, norm20.40_B, norm20.40_C, norm48.37_A,  norm48.37_B, norm48.37_C, norm129.96_A, norm129.96_B, norm129.96_C, norm190.38_A, norm190.38_B, norm190.38_C) %>%
+  #change back to original names (this is a bit cumbersome, sorry!)
+dplyr::rename(`0.00_A` = norm0.00_A, `0.00_C` = norm0.00_C, 
+                `0.35_A` = norm0.35_A, `0.35_C` = norm0.35_C, 
+            `11.59_A` = norm11.59_A, `11.59_B` = norm11.59_B, `11.59_C` =  norm11.59_C, `20.40_B` = norm20.40_B, `20.40_C` = norm20.40_C, 
+            `48.37_A` = norm48.37_A, `48.37_B` = norm48.37_B, `48.37_C` = norm48.37_C, `129.96_A` = norm129.96_A, `129.96_B` = norm129.96_B, `129.96_C` = norm129.96_C, `190.38_A` = norm190.38_A, `190.38_B` = norm190.38_B, `190.38_C` = norm190.38_C) %>%
+  gather(cond.samps, normCount, -Geneid)
+
+allCounts.tidy.filtered <- inner_join(allCounts.tidy.filtered, normCounts.tidy.filtered, by = c("Geneid", "cond.samps"))
+
+#make allCounts.tidy.filtered ready for plotting
+allCounts.tidy.filtered <- allCounts.tidy.filtered %>%
+  separate(cond.samps, c("RpoS%", "replicate"), sep = "[_]") %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)) %>%
+  group_by(Geneid, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(Geneid) %>%
+  mutate(scaler = ifelse(levelMean[1] < levelMean[18], levelMean[18], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() 
+  
+```                
+
+```{r, echo=F, message=F, warning=F}
+# compare 0 to 190.38
+countsTable.filtered.0.190.38 <- allCounts.filtered %>%
+  select(Geneid, `0.00_A`, `0.00_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+# define conditions
+condition.filtered.0.190.38 <- as.factor(c("0.00", "0.00", "190.38", "190.38", "190.38"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames = as.data.frame(colnames(countsTable.filtered.0.190.38)) %>%
+  filter(endsWith(colnames(countsTable.filtered.0.190.38), "A") 
+         | endsWith(colnames(countsTable.filtered.0.190.38), "B") 
+         | endsWith(colnames(countsTable.filtered.0.190.38),"C"))
+coldata.filtered.0.190.38 <- data.frame(row.names = colnames(countsTable.filtered.0.190.38)[2:6], condition.filtered.0.190.38)
+# note: select columns 3-8 because we just want the counts columns, without the geneID or genenames
+countsRaw.filtered.0.190.38<- countsTable.filtered.0.190.38 %>%
+  select(`0.00_A`, `0.00_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+rownames(countsRaw.filtered.0.190.38) = countsTable.filtered.0.190.38$Geneid
+# create the DESeqDataSet. cds stands for "count data set"
+dds.filtered.0.190.38 <- DESeqDataSetFromMatrix(countData = countsRaw.filtered.0.190.38, colData = coldata.filtered.0.190.38, design = ~condition.filtered.0.190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+dds.filtered.0.190.38 <- DESeq(dds.filtered.0.190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results.filtered.0.190.38 <- results(dds.filtered.0.190.38, alpha = 0.05)
+summary(results.filtered.0.190.38)
+
+Geneids <- rownames(results.filtered.0.190.38)
+regulated.genes.filtered <- as.data.frame(results.filtered.0.190.38) %>% mutate(Geneid = Geneids, regulation = ifelse(log2FoldChange > 0, "positive", "negative"))
+regulated.genes.filtered <- filter(regulated.genes.filtered, padj < 0.05)
+
+#modify allCounts.filtered to include regulation information
+allCounts.filtered <- left_join(allCounts.filtered, regulated.genes.filtered, by = "Geneid")
+
+#modify allCounts.tidy.filterd to include regulation information
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, regulated.genes.filtered, by = "Geneid")
+```
+
+##Profile Assignment - Extrapolated Profiles
+These profiles are inspired by the gene expression categories introduced by Dr. Stoebel and his lab running the experiment with three levels of RpoS (@Wong2017). 
+```{r, echo=F}
+profile.linear.pos <- c(0,0, 0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040, 0.4837,0.4837,0.4837, 1,1,1, 1,1,1)
+profile.linear.neg <- c(1,1, 0.9965,0.9965, 0.8841,0.8841,0.8841, 
+0.7960, 0.7960, 0.5163,0.5163,0.5163, 0,0,0, 0,0,0)
+profile.sens.pos <- c(0,0, 0,0, 0.4,0.4,0.4, 0.71,0.71, 0.93,0.93,0.93, 1,1,1, 1,1,1)
+profile.sens.neg <- c(1,1, 1,1, 0.6,0.6,0.6, 0.29,0.29, 0.07,0.07,0.07, 0,0,0, 0,0,0)
+profile.insens.pos <- c(0,0, 0,0, 0.04,0.04,0.04, 0.08,0.08, 0.37,0.37,0.37, 1,1,1, 1,1,1)
+profile.insens.neg <- c(1,1, 1,1, 0.96,0.96,0.96, 0.92,0.92, 0.63,0.63,0.63, 0,0,0, 0,0,0)
+
+profile.6 <- data.frame(sens.pos = profile.sens.pos, sens.neg = profile.sens.neg, insens.pos = profile.insens.pos, insens.neg = profile.insens.neg, linear.pos = profile.linear.pos, linear.neg = profile.linear.neg)
+
+profiles.tidy <- profile.6 %>% mutate(`RpoS%` = c(0,0, 0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040, 0.4837,0.4837,0.4837, 1,1,1, 1,1,1)) %>% gather(group, gene.expression, -`RpoS%`)
+
+ggplot(profiles.tidy, aes(x = `RpoS%`, y = gene.expression)) + geom_point() + geom_line() + facet_grid(. ~ group) + ylab("Gene Expression") + ggtitle("6 Profiles")
+
+normCounts.forCorr <- allCounts.tidy.filtered %>%
+  filter(regulation != "NA") %>%
+  select(Geneid, `RpoS%`, replicate, normCount) %>%
+  unite(cond.samps, `RpoS%`, replicate) %>%
+  reshape2::dcast(cond.samps ~ Geneid, value.var = "normCount") %>%
+  select(-1)
+
+profile.normCounts.forCorr <- as.data.frame(t(cor(profile.6, normCounts.forCorr)))
+rownames <- rownames(profile.normCounts.forCorr)
+rowMax <- rowMax(as.matrix(profile.normCounts.forCorr))
+profile.normCounts.forCorr <- profile.normCounts.forCorr %>%
+  mutate(Geneid = rownames,
+         maxCorr = rowMax,
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+
+# add info to allCounts.tidy.filtered
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, profile.normCounts.forCorr, by = "Geneid")
+#how many in each category?
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(group)  %>% summarise(n()/18)
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(regulation, group)  %>% summarise(n()/18)
+
+#plot!
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point(alpha = 0.7) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled), linetype = "dashed", alpha = 0.7) + theme(legend.position = "none") + facet_grid(. ~ group, labeller = label_both) + coord_cartesian(ylim = c(0,2)) + ggtitle("Profile Assignment") + ylab("Gene Expression")
+```
+
+##Partitioning Around Medoids (PAM) Clustering Analysis
+As a robust clustering algorithm which serves to assign genes to some number k clusters by minimizing the average dissimilarity of genes to some number k of representative genes, called "medoids."
+We cluster on the 1,849 genes which are differentially expressed between 0% and 190.38% RpoS from the subset of genes do not have their maximum raw count below 5 and exluding the conditions 0.00_B, 0.35_B, and 20.40_A (which have third quartiles below 10). 
+We select the optimal number of clusters by looking at the average silhouette width over all k clusters. We do this for many successive values of k, and find the highest. 
+```{r, echo=F}
+countsToCluster <- allCounts.filtered %>% filter(Geneid %in% regulated.genes.filtered$Geneid) %>%
+   select(norm0.00_A, norm0.00_C, norm0.35_A, norm0.35_C, norm11.59_A, norm11.59_B, norm11.59_C, norm20.40_B, norm20.40_C, norm48.37_A,  norm48.37_B, norm48.37_C, norm129.96_A, norm129.96_B, norm129.96_C, norm190.38_A, norm190.38_B, norm190.38_C)
+rownames(countsToCluster) <- filter(allCounts.filtered, Geneid %in% regulated.genes.filtered$Geneid)$Geneid
+dissimilarity.matrix <- 1 - cor(t(countsToCluster))
+pam.regulated <- pam(dissimilarity.matrix, 6)
+#pam.regulated.silinfo <- pam.regulated$silinfo
+pam.regulated.clusters <- as.data.frame(pam.regulated$clustering)
+Geneids <- rownames(pam.regulated.clusters) # add the Geneid as another column
+colnames(pam.regulated.clusters) = c("pam.cluster") # rename the column to make it a nice name
+pam.regulated.clusters <- pam.regulated.clusters %>% mutate(Geneid = Geneids)
+
+allCounts.filtered.PAMclusts <- inner_join(allCounts.filtered, pam.regulated.clusters, by = "Geneid")
+allCounts.filtered.PAMclusts %>% group_by(pam.cluster, regulation) %>% summarise(n())
+
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, pam.regulated.clusters, by = "Geneid")
+allCounts.tidy.filtered %>% group_by(pam.cluster, regulation) %>% summarise(n()/18)
+
+allCounts.tidy.filtered.PAMclusts <- filter(allCounts.tidy.filtered, pam.cluster != "NA")
+  
+#plot
+ggplot(data = allCounts.tidy.filtered.PAMclusts, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = allCounts.tidy.filtered.PAMclusts, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.cluster, labeller = label_both)             
+```
+
+##K-means
+```{r, echo=F}
+set.seed(83)
+kmeans.regulated <- Kmeans(countsToCluster, centers = 6, iter.max = 100, method = "correlation")
+kmeans.regulated.clusters <- as.data.frame(kmeans.regulated$cluster)
+colnames(kmeans.regulated.clusters) = c("kmeans.cluster")
+Geneids <- rownames(kmeans.regulated.clusters)
+kmeans.regulated.clusters <- kmeans.regulated.clusters %>% mutate(Geneid = Geneids)
+
+#add info to allCounts.tidy.filtered 
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, kmeans.regulated.clusters, by="Geneid")
+#tally up
+allCounts.tidy.filtered %>% 
+  filter(regulation != "NA") %>%
+  group_by(regulation, kmeans.cluster) %>% summarise(n()/18)
+#plot
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point(alpha = 0.7) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled), alpha = 0.7, linetype = "dashed") + theme(legend.position = "none") + coord_cartesian(ylim = c(0,2)) + facet_grid(.~kmeans.cluster, labeller = label_both)
+
+set.seed(84)
+kmeans.regulated.2 <- Kmeans(countsToCluster, centers = 6, iter.max = 100, method = "correlation")
+kmeans.regulated.clusters.2 <- as.data.frame(kmeans.regulated.2$cluster)
+colnames(kmeans.regulated.clusters.2) = c("kmeans.cluster.2")
+Geneids <- rownames(kmeans.regulated.clusters.2)
+kmeans.regulated.clusters.2 <- kmeans.regulated.clusters.2 %>% mutate(Geneid = Geneids)
+
+#add info to allCounts.tidy.filtered 
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, kmeans.regulated.clusters.2, by="Geneid")
+#tally up
+allCounts.tidy.filtered %>% 
+  filter(regulation != "NA") %>%
+  group_by(regulation, kmeans.cluster.2) %>% summarise(n()/18)
+#plot
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point(alpha = 0.7) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled), alpha = 0.7, linetype = "dashed") + theme(legend.position = "none") + coord_cartesian(ylim = c(0,2)) + facet_grid(.~kmeans.cluster.2, labeller = label_both)
+```
+
+##Adjusted Rand Index to Compare the Clustering Algorithms
+```{r, echo=F, message=F, warning=F}
+compareClusters <- filter(allCounts.tidy.filtered, regulation != "NA")
+#PAM vs. 
+paste("Adjusted Rand Index for PAM vs K-means (amap package): ", round(adjustedRandIndex(compareClusters$pam.cluster, compareClusters$kmeans.cluster), 3))
+paste("Adjusted Rand Index for PAM vs Assign Profiles: ", round(adjustedRandIndex(compareClusters$pam.cluster, compareClusters$group), 3))
+paste("Adjusted Rand Index for K-means (amap package) vs Assign Profiles: ", round(adjustedRandIndex(compareClusters$group, compareClusters$kmeans.cluster), 3))
+
+#compare the two kmeans!
+paste("Adjusted Rand Index for PAM vs K-means (amap package): ", round(adjustedRandIndex(compareClusters$kmeans.cluster, compareClusters$kmeans.cluster.2), 3))
+
+# comparing with profiles assignments
+cluster.comparision <- allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(group, pam.cluster, kmeans.cluster, kmeans.cluster.2) %>% summarise(number = n()/18) %>% arrange(group)
+
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(kmeans.cluster, kmeans.cluster.2) %>% summarise(number = n()/18) %>% arrange(kmeans.cluster)
+
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(group, kmeans.cluster) %>% summarise(number = n()/18) %>% arrange(group)
+```
+
+#References

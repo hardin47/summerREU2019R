@@ -1,0 +1,700 @@
+---
+title: "Grouping Genes by Patterns of Gene Expression"
+author: "Madison Hobbs"
+date: "7/13/2017"
+output: pdf_document
+bibliography: rpoSsummer2017.bib
+---
+
+```{r, warning=FALSE, echo=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.width = 7, fig.height = 3, fig.align = 'center',
+                      #fig.width = 30, fig.height = 10, dev = "jpeg", 
+                      #fig.align = 'center', fig.keep="all", fig.path = "posterpics/", 
+                      #dpi = 500, 
+                      cache = TRUE, message = FALSE, warning = FALSE) 
+library(tidyverse)
+library(stringr)
+library(cluster)
+library("DESeq2")
+library(amap)
+library(mclust)
+
+allCounts <- read.csv("DMS2670_LB_NC_000913.tsv", header = T, sep = "\t") 
+```
+
+```{r, warning=FALSE, echo=FALSE}
+bnum = "b[0-9]{4}"
+allCounts$GeneidBackup = allCounts$Geneid
+allCounts <- allCounts %>% separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+
+allCounts <- allCounts %>% select(Geneid, feature,                                           
+         "0.00_A" = A0,
+         "0.00_B" = B0,
+         "0.00_C" = C0,
+         "0.35_A" = A10..5,
+         "0.35_B" = B10..5,
+         "0.35_C" = C10..5,
+        "11.59_A" = A5x10.5,
+         "11.59_B" = B5x10.5,
+        "11.59_C" = C5x10.5,
+        "20.40_A" = A10..4,
+        "20.40_B" = B10..4,
+        "20.40_C" = C10..4,
+        "48.37_A" = A10..3,
+        "48.37_B" = B10..3,
+        "48.37_C" = C10..3,
+       "100.00_A" = A2537,
+       "100.00_B" = B2537,
+       "100.00_C" = C2537,
+       "129.96_A" = A2x10..3,
+       "129.96_B" = B2x10..3,
+       "129.96_C" = C2x10..3,
+       "190.38_A" = A5x10..3,
+       "190.38_B" = B5x10..3,
+       "190.38_C" = C5x10..3)
+
+# IGR's separate: 
+# do start.bnum end.bnum start.genename end.genename
+# left join igrs to allCounts
+genename = ",[a-z]{3}[A-Z,]."
+rna.name = ",rna[0-9].."
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]")
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename),
+    TRUE ~ str_extract(igr$Geneid1, rna.name))
+igr$end.gene <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename),
+    TRUE ~ str_extract(igr$Geneid2, rna.name))
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum),
+    TRUE ~ "none")
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum),
+    TRUE ~ "none")
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% select(-comma)
+allCounts <- full_join(igr, allCounts)
+```
+
+
+```{r, echo=F, warning = F, message = F}
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.."
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename)
+cds$bnum <- str_extract(cds$Geneid, bnum)
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, cds)
+```
+
+
+```{r, echo=F, warning = F, message = F}
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].."
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA"))
+rna$genename <- str_extract(rna$Geneid, rna.name)
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, rna)
+
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA"))
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name)
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, rRNA)
+
+#tRNA
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA"))
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+
+# remove the NA rows we just created by full_joining while adding the ncRNA, rRNA, tRNA genenames
+allCounts <- filter(allCounts, feature %in% c("IGR", "AS_IGR") | genename != "NA")
+
+# make tidy data
+countsTable.all.tidy <- allCounts %>%
+  gather(cond.samps, rawCount, -Geneid, -feature, -genename, -bnum, -Geneid1, -Geneid2, -feature1, -feature2, -start.gene, -end.gene, -start.bnum, - end.bnum)
+```
+
+# Profile Assignment, PAM Clustering, and K-means Clustering on Filtered Data
+We are deciding to remove the samples with third quartiles below 10 raw counts: 0.00_B which has a median of 1 and third quartile of 4 raw counts, 0.35_B which has a median of 1 and third quartile of 3 raw counts, and 20.40_A which has a median of 2 and third quartile of 8 raw counts. We also remove any rows whose maximum raw count is less than 5, which constitutes over 25% of the genes. In doing this, we reduce the number of genes we will consider from 14,108 to 10,376. Finally, we normalize the allCounts raw read data set with those columns and rows removed. We use DESeq2 [@Love2014] to normalize. 
+
+```{r, echo=F, message=F, warning=F}
+countsTable.all.tidy %>% group_by(Geneid) %>% filter(max(rawCount) < 5) %>% dim()
+```
+
+```{r, echo=F, message=F, warning=F}
+# keep only genes whose maximum raw count is greater than 5 and exclude the samples `0.00_B`, `0.35_B`, and `20.40_A` whose Q3's are below 10. We also exclude the samples with condition 100% since these are a different strain of E. Coli
+allCounts.tidy.filtered <- countsTable.all.tidy %>% group_by(Geneid) %>%
+  filter(max(rawCount) > 5) %>% filter(cond.samps %in% c("0.00_B", "0.35_B", "20.40_A", "100.00_A", "100.00_B", "100.00_C") == FALSE)
+
+allCounts.tidy.filtered %>% group_by(feature) %>% summarise(n()/18)
+
+# create wide, messy version of this which DESeq2 needs. Filter out the unwanted columns but not the unwanted rows; we're going to need these for normalization
+allCounts.filtered <- allCounts %>% select(Geneid, feature, `0.00_A`, `0.00_C`,
+         `0.35_A`, `0.35_C`, 
+         `11.59_A`, `11.59_B`, `11.59_C`, 
+         `20.40_B`, `20.40_C`, 
+         `48.37_A`, `48.37_B`, `48.37_C`, 
+         `129.96_A`, `129.96_B`, `129.96_C`, 
+         `190.38_A`, `190.38_B`, `190.38_C`)
+
+allCounts.filtered.justCounts <- allCounts.filtered %>% select(`0.00_A`, `0.00_C`, 
+ `0.35_A`, `0.35_C`,  `11.59_A`, `11.59_B`, `11.59_C`, `20.40_B`, `20.40_C`, 
+`48.37_A`, `48.37_B`, `48.37_C`, `129.96_A`, `129.96_B`, `129.96_C`,  
+`190.38_A`, `190.38_B`, `190.38_C`)
+
+condition.filtered <- as.factor(c("0.00", "0.00", "0.35", "0.35", "11.59", "11.59", "11.59", "20.40", "20.40", "48.37", "48.37", "48.37", "129.96", "129.96", "129.96", "190.38", "190.38", "190.38"))
+
+coldata.filtered <- as.data.frame(row.names =  colnames(allCounts.filtered.justCounts), condition.filtered)
+dds.filtered <- DESeqDataSetFromMatrix(countData = allCounts.filtered.justCounts, colData = coldata.filtered, design = ~condition.filtered)
+# estimate size factors, dispersions, etc, and testing differential expression
+dds.filtered <- DESeq(dds.filtered)
+
+# get normalized counts
+normCounts.filtered <- as.data.frame(counts(dds.filtered, normalized = TRUE)) %>%
+  dplyr::rename(norm0.00_A = `0.00_A`, norm0.00_C = `0.00_C`, norm0.35_A = `0.35_A`, norm0.35_C = `0.35_C`, norm11.59_A = `11.59_A`, norm11.59_B = `11.59_B`, norm11.59_C = `11.59_C`, norm20.40_B = `20.40_B`,norm20.40_C = `20.40_C`, norm48.37_A = `48.37_A`,  norm48.37_B = `48.37_B`, norm48.37_C = `48.37_C`, norm129.96_A = `129.96_A`, norm129.96_B = `129.96_B`, norm129.96_C = `129.96_C`, norm190.38_A = `190.38_A`, norm190.38_B = `190.38_B`, norm190.38_C = `190.38_C`)
+# append normalized counts to wide, messy allCounts.filtered.
+# ALSO FILTER TO REMOVE THE GENES WHOSE MAX RAW COUNT WAS LESS THAN 5
+allCounts.filtered <- cbind(allCounts.filtered, normCounts.filtered) %>% 
+  filter(Geneid %in% allCounts.tidy.filtered$Geneid) 
+  #these are the genes whose max raw count was less than 5
+
+#get tidy normalized counts
+normCounts.tidy.filtered <- allCounts.filtered %>% select(Geneid, norm0.00_A, norm0.00_C, norm0.35_A, norm0.35_C, norm11.59_A, norm11.59_B, norm11.59_C, norm20.40_B, norm20.40_C, norm48.37_A,  norm48.37_B, norm48.37_C, norm129.96_A, norm129.96_B, norm129.96_C, norm190.38_A, norm190.38_B, norm190.38_C) %>%
+  #change back to original names (this is a bit cumbersome, sorry!)
+dplyr::rename(`0.00_A` = norm0.00_A, `0.00_C` = norm0.00_C, 
+                `0.35_A` = norm0.35_A, `0.35_C` = norm0.35_C, 
+            `11.59_A` = norm11.59_A, `11.59_B` = norm11.59_B, `11.59_C` =  norm11.59_C, `20.40_B` = norm20.40_B, `20.40_C` = norm20.40_C, 
+            `48.37_A` = norm48.37_A, `48.37_B` = norm48.37_B, `48.37_C` = norm48.37_C, `129.96_A` = norm129.96_A, `129.96_B` = norm129.96_B, `129.96_C` = norm129.96_C, `190.38_A` = norm190.38_A, `190.38_B` = norm190.38_B, `190.38_C` = norm190.38_C) %>%
+  gather(cond.samps, normCount, -Geneid)
+
+allCounts.tidy.filtered <- inner_join(allCounts.tidy.filtered, normCounts.tidy.filtered, by = c("Geneid", "cond.samps"))
+
+#make allCounts.tidy.filtered ready for plotting
+allCounts.tidy.filtered <- allCounts.tidy.filtered %>%
+  separate(cond.samps, c("RpoS%", "replicate"), sep = "[_]") %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)) %>%
+  group_by(Geneid, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(Geneid) %>%
+  mutate(scaler = ifelse(levelMean[1] < levelMean[18], levelMean[18], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() 
+```                
+
+Next, we locate the genes which are differentially expressed between the lowest and highest conditions using DESeq2 [@Love2014]. These will be what we consider to be the genes regulated by RpoS.
+
+```{r, echo=F, message=F, warning=F}
+# compare 0 to 190.38
+countsTable.filtered.0.190.38 <- allCounts.filtered %>%
+  select(`0.00_A`, `0.00_C`, `190.38_A`, `190.38_B`, `190.38_C`)
+rownames(countsTable.filtered.0.190.38) <- allCounts.filtered$Geneid
+# define conditions
+condition.filtered.0.190.38 <- as.factor(c("0.00", "0.00", "190.38", "190.38", "190.38"))
+# we only want the relevant column name from countsTable for each condition (we don't want Geneid or genename)
+rownames <- as.data.frame(colnames(countsTable.filtered.0.190.38))
+coldata.filtered.0.190.38 <- data.frame(row.names = colnames(countsTable.filtered.0.190.38), condition.filtered.0.190.38)
+# create the DESeqDataSet. cds stands for "count data set"
+dds.filtered.0.190.38 <- DESeqDataSetFromMatrix(countData = countsTable.filtered.0.190.38, colData = coldata.filtered.0.190.38, design = ~condition.filtered.0.190.38)
+# estimate size factors, dispersions, etc, and testing differential expression
+dds.filtered.0.190.38 <- DESeq(dds.filtered.0.190.38)
+#estimating dispersion by treating samples as replicates
+
+#get results
+results.filtered.0.190.38 <- results(dds.filtered.0.190.38, alpha = 0.05)
+summary(results.filtered.0.190.38)
+
+Geneids <- rownames(countsTable.filtered.0.190.38)
+regulated.genes.filtered <- as.data.frame(results.filtered.0.190.38) %>% mutate(Geneid = Geneids, regulation = ifelse(log2FoldChange > 0, "positive", "negative"))
+regulated.genes.filtered <- filter(regulated.genes.filtered, padj < 0.05)
+
+#modify allCounts.filtered to include regulation information
+allCounts.filtered <- left_join(allCounts.filtered, regulated.genes.filtered, by = "Geneid")
+
+#modify allCounts.tidy.filterd to include regulation information
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, regulated.genes.filtered, by = "Geneid")
+```
+
+##Profile Assignment - Extrapolated Profiles
+We use the profiles extrapolated from profiles that worked to successfully classify the data with three levels [see Re-Rewritten2017_RNAseq_analysis using data from @Wong2017]. 
+
+```{r, echo=F}
+#extrapolated from profiles as seen in Madison's reproduction and reanalysis of Garrett's code
+profile.linear.pos <- c(0,0, 0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040, 0.4837,0.4837,0.4837, 1,1,1, 1,1,1)
+profile.linear.neg <- c(1,1, 0.9965,0.9965, 0.8841,0.8841,0.8841, 
+0.7960, 0.7960, 0.5163,0.5163,0.5163, 0,0,0, 0,0,0)
+profile.sens.pos <- c(0,0, 0,0, 0.4,0.4,0.4, 0.71,0.71, 0.93,0.93,0.93, 1,1,1, 1,1,1)
+profile.sens.neg <- c(1,1, 1,1, 0.6,0.6,0.6, 0.29,0.29, 0.07,0.07,0.07, 0,0,0, 0,0,0)
+profile.insens.pos <- c(0,0, 0,0, 0.04,0.04,0.04, 0.08,0.08, 0.37,0.37,0.37, 1,1,1, 1,1,1)
+profile.insens.neg <- c(1,1, 1,1, 0.96,0.96,0.96, 0.92,0.92, 0.63,0.63,0.63, 0,0,0, 0,0,0)
+
+# data frame of all six profiles side by side
+profile.6 <- data.frame(sens.pos = profile.sens.pos, sens.neg = profile.sens.neg, insens.pos = profile.insens.pos, insens.neg = profile.insens.neg, linear.pos = profile.linear.pos, linear.neg = profile.linear.neg)
+
+#make profiles data table tidy 
+profiles.tidy <- profile.6 %>% mutate(`RpoS%` = c(0,0, 0.0035,0.0035, 0.1159,0.1159,0.1159, 0.2040,0.2040, 0.4837,0.4837,0.4837, 1.2996,1.2996,1.2996, 1.9038,1.9038,1.9038)) %>% gather(group, gene.expression, -`RpoS%`)
+# plot the six profiles
+ggplot(profiles.tidy, aes(x = `RpoS%`, y = gene.expression)) + geom_point(size = 2) + geom_line(size = 2) + facet_grid(. ~ group) + ylab("Gene Expression") + ggtitle("6 Profiles") +  theme(plot.title = element_text(face = "bold"))
+```
+
+```{r}
+# gather normalized counts which we will be correlating with the profiles
+normCounts.forCorr <- allCounts.tidy.filtered %>%
+  filter(regulation != "NA") %>%
+  select(Geneid, `RpoS%`, replicate, normCount) %>%
+  unite(cond.samps, `RpoS%`, replicate) %>%
+  reshape2::dcast(cond.samps ~ Geneid, value.var = "normCount") %>%
+  select(-1)
+
+# correlate normalized counts with each of the six profiles, and sort each gene with the profile with which it has a maximum correlation (with linear as the tiebreaker).
+profile.normCounts.forCorr <- as.data.frame(t(cor(profile.6, normCounts.forCorr)))
+rownames <- rownames(profile.normCounts.forCorr)
+rowMax <- rowMax(as.matrix(profile.normCounts.forCorr))
+profile.normCounts.forCorr <- profile.normCounts.forCorr %>%
+  mutate(Geneid = rownames,
+         maxCorr = rowMax,
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+
+# add info to allCounts.tidy.filtered
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, profile.normCounts.forCorr, by = "Geneid")
+#how many in each category?
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(group)  %>% summarise(n()/18)
+allCounts.tidy.filtered %>% filter(regulation != "NA") %>%
+  group_by(regulation, group)  %>% summarise(n()/18)
+
+#plot!
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled)) + geom_point(aes(col = Geneid)) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled, col = Geneid), linetype = "dashed") + theme(legend.position = "none") + facet_grid(. ~ group, labeller = label_both) + coord_cartesian(ylim = c(0,2)) + ggtitle("Profile Assignment") + ylab("Gene Expression") + theme(plot.title = element_text(face = "bold"))
+```
+
+We notice that the majority of genes are most highly correlated with the sensitive positive or sensitive negative Shapes. It is also clear from the plots that the genes that do fall into insensitive positive, linear negative, and linear positive categories don't exactly have shapes which match the profile shapes. We see a lot of non-monotonicity throughout the plots, which is curious and merits further investigation along with other potential problems in the data [see Questions_Regarding_2017_Data_Simplified]. 
+
+However, if we are to proceed with this data, it makes sense to try other grouping techniques, such as unsupervised clustering, which tell us what are the most common shapes present in our data. 
+
+
+##Partitioning Around Medoids (PAM) Clustering Analysis
+Partitioning Around Medoids (PAM) [@Kaufman1990] is a robust clustering algorithm which serves to assign genes to some number k clusters by minimizing the average dissimilarity of genes to some number k of representative genes, called "medoids."
+We cluster on the 1,849 genes gathered above which are differentially expressed between 0% and 190.38% RpoS from the subset of genes do not have their maximum raw count below 5 and exluding the conditions 0.00_B, 0.35_B, and 20.40_A (which have third quartiles below 10). 
+We select the optimal number of clusters by looking at a range of values for k. 
+
+```{r, echo=F}
+#gather nice wide data frame of normalized counts to cluster 
+countsToCluster <- allCounts.filtered %>% filter(Geneid %in% regulated.genes.filtered$Geneid) %>%
+   select(norm0.00_A, norm0.00_C, norm0.35_A, norm0.35_C, norm11.59_A, norm11.59_B, norm11.59_C, norm20.40_B, norm20.40_C, norm48.37_A,  norm48.37_B, norm48.37_C, norm129.96_A, norm129.96_B, norm129.96_C, norm190.38_A, norm190.38_B, norm190.38_C)
+#save Geneid's as rownames
+rownames(countsToCluster) <- filter(allCounts.filtered, Geneid %in% regulated.genes.filtered$Geneid)$Geneid
+
+#generate dissmilarity matrix based on spearman correlation
+dissimilarity.matrix <- 1 - cor(t(countsToCluster), method = "spearman")
+
+#run PAM on k = 2...20, storing the results
+n=20
+pam.clusters <- c()
+pam.medoids <- c()
+k.value <- c()
+clus.avg.silwidths <- c()
+avg.silwidth <- c()
+for(i in seq_along(2:n)){
+  pam <- pam(dissimilarity.matrix, i)
+  thisCluster <- as.data.frame(pam$clustering)
+  pam.clusters <- c(pam.clusters, thisCluster)
+  clus.avg.silwidths<- c(clus.avg.silwidths, pam$silinfo$clus.avg.widths)
+  pam.medoids <- c(pam.medoids, rownames(pam$medoids))
+  for(j in seq_along(1:i)){
+    k.value <- c(k.value, i)
+  }
+  for(j in seq_along(1:i)){
+    avg.silwidth <- c(avg.silwidth, pam$silinfo$avg.width)
+  }
+}
+# data frame of the k medoids for each value of k. This data frame also includes silhouette width because
+pam.medoids <- data.frame(pam.medoids, k.value) %>% filter(k.value != 1) %>% mutate(clus.avg.silwidths = clus.avg.silwidths, avg.silwidth = avg.silwidth)
+pam.clusters <- as.data.frame(pam.clusters) %>% select(-pam.clustering) %>%
+  mutate(Geneid = rownames(countsToCluster))
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, pam.clusters) 
+regulated.tidy <- filter(allCounts.tidy.filtered, regulation != "NA")
+```
+
+```{r}
+#adjusted rand is pretty predictable - the closer the k values are to each other, the larger the rand.
+
+paste("Adjusted Rand Index for k = 2 vs k = 3: ", round(adjustedRandIndex(pam.clusters$pam.clustering.1, pam.clusters$pam.clustering.2), 3))
+paste("Adjusted Rand Index for k = 2 vs k = 4: ", round(adjustedRandIndex(pam.clusters$pam.clustering.1, pam.clusters$pam.clustering.3), 3))
+paste("Adjusted Rand Index for k = 2 vs k = 5: ", round(adjustedRandIndex(pam.clusters$pam.clustering.1, pam.clusters$pam.clustering.4), 3))
+
+paste("Adjusted Rand Index for k = 6 vs k = 7: ", round(adjustedRandIndex(pam.clusters$pam.clustering.5, pam.clusters$pam.clustering.6), 3))
+paste("Adjusted Rand Index for k = 2 vs k = 5: ", round(adjustedRandIndex(pam.clusters$pam.clustering.1, pam.clusters$pam.clustering.4), 3))
+
+paste("Adjusted Rand Index for k = 5 vs k = 5: ", round(adjustedRandIndex(pam.clusters$pam.clustering.4, pam.clusters$pam.clustering.4), 3))
+
+# more interestingly, comparing with the profiles assignment method... see further down
+```
+
+Adjusted Rand Index is a measure of how similarly two clustering methods cluster the data, with 0 meaning the clusters match up as well as they would by random chance and 1 representing perfect synchronozation between the clusters. Any ARI values below 0 would indicate that the clusters are more dissimilar than random chance would have it. 
+
+Predictably, the ARI is closer to 1 for values of k which are closer to each other, and ARI decreases as the two values of k we compare become more distant. For the same value of k, ARI is across two repetitions of k-medoids is always 1, indicating that the cluster medoids do not change for different iterations of PAM. This is probably because PAM employs a swapping process in the algorithm which checks to see if replacing each selected medoid with any other object would yield a better result. 
+
+```{r}
+# Looking at the medoids selected for each k value help us see what are the k most common shapes present in our data! 
+#plot medoids for different k values
+medoids.k2 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 2)$pam.medoids)
+medoids.k3 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 3)$pam.medoids)
+medoids.k4 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 4)$pam.medoids)
+medoids.k5 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 5)$pam.medoids)
+medoids.k6 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 6)$pam.medoids)
+medoids.k7 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 7)$pam.medoids)
+medoids.k8 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 8)$pam.medoids)
+medoids.k9 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 9)$pam.medoids)
+medoids.k10 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 10)$pam.medoids)
+medoids.k11 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 11)$pam.medoids)
+medoids.k12 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 12)$pam.medoids)
+medoids.k13 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 13)$pam.medoids)
+medoids.k14 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 14)$pam.medoids)
+medoids.k15 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 15)$pam.medoids)
+medoids.k16 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 16)$pam.medoids)
+medoids.k17 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 17)$pam.medoids)
+medoids.k18 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 18)$pam.medoids)
+medoids.k19 <- filter(regulated.tidy, Geneid %in% filter(pam.medoids, k.value == 19)$pam.medoids)
+```
+
+```{r include=FALSE}
+#k = 2, plot medoids alone
+ggplot(data = medoids.k2, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k2, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.1) + ggtitle("PAM medoids, k=2") + ylab("Gene Expression")
+```
+
+```{r}
+#k = 2, genes with medoids overlaid
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.1) + ggtitle(paste("Gene Expression Clustering, PAM k=2; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 2)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k2, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r}
+regulated.tidy %>% group_by(regulation, pam.clustering.1) %>% summarize(numGene = n()/18)
+```
+
+It is affirming that PAM independently clusters the genes nearly perfectly between the up- and down-regulation found by differential expression analysis. 
+
+```{r, include=FALSE}
+#k = 3, plot medoids alone
+ggplot(data = medoids.k3, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k3, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.2) + ggtitle("PAM medoids, k=3")+ ylab("Gene Expression")
+```
+
+```{r}
+#k = 3, plot genes with medoids overlaid
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.2) + ggtitle(paste("Gene Expression Clustering, PAM k=3; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 3)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k3, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r, include=FALSE}
+#k = 4
+#show medoids alone
+ggplot(data = medoids.k4, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k4, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.3) + ggtitle("PAM medoids, k=4")+ ylab("Gene Expression")
+```
+
+```{r}
+#k = 4
+# show genes by cluster with medoids
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.3) + ggtitle(paste("Gene Expression Clustering, PAM k=4; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 4)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k4, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r, include=FALSE}
+#k = 5
+#show medoids alone
+ggplot(data = medoids.k4, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k5, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.4) + ggtitle("PAM medoids, k=5")+ ylab("Gene Expression")
+```
+
+```{r}
+#k = 5, show genes with medoids
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.4) + ggtitle(paste("Gene Expression Clustering, PAM k=5; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 5)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k5, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r, include=FALSE}
+#k = 6
+#show medoids alone
+ggplot(data = medoids.k6, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k6, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.5) + ggtitle("PAM medoids, k=6")+ ylab("Gene Expression")
+```
+
+```{r}
+# k = 6, show genes with medoids
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.5) + ggtitle(paste("Gene Expression Clustering, PAM k=6; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 6)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k6, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+```
+
+```{r}
+ggplot(data = regulated.tidy, aes(x = `RpoS%`, y = normCountScaled, col=Geneid)) + geom_point() + geom_line(data = regulated.tidy, aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.6) + ggtitle(paste("Gene Expression Clustering, PAM k=7; Medoids Overlaid in black; avg silhouette width = ", round(filter(pam.medoids, k.value == 7)$avg.silwidth, 3))) + ylab("Gene Expression") + geom_line(data = medoids.k7, aes(y = meanScaled), col = "black", size = 2) + theme(plot.title = element_text(face = "bold"))
+
+#The larger values of k seem to overfit the data with too highly specific of shapes
+#ggplot(data = medoids.k15, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k15, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.14) + ggtitle("PAM medoids, k=15")+ ylab("Gene Expression")
+#ggplot(data = medoids.k19, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = medoids.k19, aes(y = meanScaled), size = 2) + coord_cartesian(ylim = c(0,2)) + theme(legend.position = "none") + facet_grid(. ~ pam.clustering.18) + ggtitle("PAM medoids, k=19")+ ylab("Gene Expression")
+```
+
+The PAM plots help us see the most typical shapes of gene expression present in our data. Average silhouette width is a measure of how well each gene is classified into each cluster, and the closer this value is to 1, the more differentiable the clusters. Average silhouette width decreases as k increases for our data. This makes sense, as k = 2 (showing positively regulated and negatively regulated genes) has the highest silhouette width, telling us that the most prominent division in our data is into positively and negatively regulated genes. At seven clusters, average silhouette width is low (the closer to 0, the less differntiable the clusters). For larger values of k, the average silhouette width continues to decrease which shows us that larger values of k would yield progressively more overfitting and is probably not approrpriate.
+
+With this Goldylocks-style thinking in mind, we look for values of k which yield differentiable clusters (relatively high average silhouette width) and at the same time produce medoids specific enough for us 
+to characterize each cluster's general expression shape. Letting k be between 4 and 6 appears the best range for these purposes.
+
+Looking at the clusters and gene shapes for the k=5 clustering results, we see a sensitive negative shape (cluster 1) and a sensitive positive shape (cluster 5). Non-montonoicity is common enough that two of the medoids have prominent non-monotonic shape, one whose general trend is positive (cluster 3) and the other whose general trend is negative (cluster 4). Finally, there exists a prominent roughly linear positive pattern (cluster 2). 
+
+```{r}
+compareClusters <- filter(allCounts.tidy.filtered, regulation != "NA")
+
+rand.PAMvsProfiles <- c(round(adjustedRandIndex(compareClusters$pam.clustering.1, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.2, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.3, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.4, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.5, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.6, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.7, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.8, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.9, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.10, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.11, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.12, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.13, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.14, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.15, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.16, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.17, compareClusters$group), 4), round(adjustedRandIndex(compareClusters$pam.clustering.18, compareClusters$group), 4))
+
+paste("ARI profile assignment vs PAM k = 2: ", round(adjustedRandIndex(allCounts.tidy.filtered$pam.clustering.1, allCounts.tidy.filtered$group), 3))
+paste("ARI profile assignment vs PAM k = 6: ", round(adjustedRandIndex(allCounts.tidy.filtered$pam.clustering.5, allCounts.tidy.filtered$group), 3))
+```
+
+Finally, we use the Adjusted Rand Index tocompare the PAM clustering results to those given by the assignment to the profiles we designed. Adjusted Rand Index (ARI) measures how similarly two clustering methods classified objects. An ARI of -1 would suggest that the two methods are in perfect disagreement, and an ARI of 1 would suggest that the methods are in perfect agreement. An ARI of 0 would suggest that the two methods are no better matched than they would be by random chance (based on the hypergeometric probability distribution). 
+
+The PAM cluster results with k = 2 is the closest match to the profile assignment results (ARI = 0.979). This makes sense as most of the genes were classified by profile assignment into one of two groups, sensitive positive and sensitive negative. The PAM cluster results with k = 6, the same number of groups used by profile assignment gives a much lower ARI (0.369), showing that that two methods do not classify genes in a very similar manner. We conclude that 6 groups generated by PAM are more representative of the shapes present in our data as compared to the six profiles we designed. 
+
+##K-means
+We also try the k-means clutering algorithm, as this is a common partitioning clustering algorithm and has been used in research addressing similar gene expression classification goals [@Brinsmade]. 
+
+K-means randomly selects a k starting points, clusters the genes according to those k points, then finds the mean of each cluster (an amalgam of the genes in each cluster, so these centers end up not being real genes from our data). K-means then re-clusters according to these new clusters, takes the mean of each of the clusters it found, and re-clusters according to those new clusters. This process continues recursively until the cluster centers and clusters they form do not change (converge). 
+
+```{r, echo=F}
+#try two iterations
+set.seed(83)
+kmeans.regulated <- Kmeans(countsToCluster, centers = 6, iter.max = 100, method = "spearman")
+kmeans.regulated.clusters <- as.data.frame(kmeans.regulated$cluster)
+colnames(kmeans.regulated.clusters) = c("kmeans.cluster")
+Geneids <- rownames(kmeans.regulated.clusters)
+kmeans.regulated.clusters <- kmeans.regulated.clusters %>% mutate(Geneid = Geneids)
+
+#add info to allCounts.tidy.filtered 
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, kmeans.regulated.clusters, by="Geneid")
+#tally up
+allCounts.tidy.filtered %>% 
+  filter(regulation != "NA") %>%
+  group_by(regulation, kmeans.cluster) %>% summarise(n()/18)
+
+set.seed(84)
+kmeans.regulated.2 <- Kmeans(countsToCluster, centers = 6, iter.max = 100, method = "spearman")
+kmeans.regulated.clusters.2 <- as.data.frame(kmeans.regulated.2$cluster)
+colnames(kmeans.regulated.clusters.2) = c("kmeans.cluster.2")
+Geneids <- rownames(kmeans.regulated.clusters.2)
+kmeans.regulated.clusters.2 <- kmeans.regulated.clusters.2 %>% mutate(Geneid = Geneids)
+
+#add info to allCounts.tidy.filtered 
+allCounts.tidy.filtered <- left_join(allCounts.tidy.filtered, kmeans.regulated.clusters.2, by="Geneid")
+#tally up
+allCounts.tidy.filtered %>% 
+  filter(regulation != "NA") %>%
+  group_by(regulation, kmeans.cluster.2) %>% summarise(n()/18)
+
+# extract kmeans centers
+kmeanscenters <- as.data.frame(kmeans.regulated$centers)
+kmeanscenters <- kmeanscenters %>% mutate(cluster = c(1, 2, 3, 4, 5, 6)) %>% gather(cond.samp, normCount, -cluster) %>%
+  separate(cond.samp, c("RpoS%", "replicate"), sep = "[_]") %>%
+  separate(`RpoS%`, c("norm", "RpoS%"), sep = "[m]") %>% select(-norm) %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)) %>%
+  group_by(cluster, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(cluster) %>%
+  mutate(scaler = ifelse(levelMean[1] < levelMean[18], levelMean[18], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() 
+
+kmeanscenters.2 <- as.data.frame(kmeans.regulated.2$centers)
+kmeanscenters.2 <- kmeanscenters.2 %>% mutate(cluster = c(1, 2, 3, 4, 5, 6)) %>% gather(cond.samp, normCount, -cluster) %>%
+  separate(cond.samp, c("RpoS%", "replicate"), sep = "[_]") %>%
+  separate(`RpoS%`, c("norm", "RpoS%"), sep = "[m]") %>% select(-norm) %>%
+  mutate(`RpoS%` = as.numeric(`RpoS%`)) %>%
+  group_by(cluster, `RpoS%`) %>%
+  mutate(levelMean = mean(normCount)) %>%
+  ungroup() %>%
+  group_by(cluster) %>%
+  mutate(scaler = ifelse(levelMean[1] < levelMean[18], levelMean[18], levelMean[1]),
+         normCountScaled = normCount/scaler,
+         meanScaled = levelMean/scaler) %>%
+  ungroup() 
+
+```
+
+```{r}
+#plot centers kmeans, k=6, iteration 1
+ggplot(data = kmeanscenters, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = kmeanscenters, aes(y = meanScaled), size = 2) + facet_grid(. ~ cluster) + coord_cartesian(ylim = c(0,2)) + ggtitle("K-means Centers #1, k = 6")
+#plot genes kmeans, k=6, iteration 1
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point(alpha = 0.7) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled), alpha = 0.7, linetype = "dashed") + theme(legend.position = "none") + coord_cartesian(ylim = c(0,2)) + facet_grid(.~kmeans.cluster) + ggtitle("K-means #1, k = 6") + ylab("Gene Expression")
+
+#plot centers kmeans, k=6, iteration 2
+ggplot(data = kmeanscenters.2, aes(x = `RpoS%`, y = normCountScaled)) + geom_point() + geom_line(data = kmeanscenters.2, aes(y = meanScaled), size = 2) + facet_grid(. ~ cluster) + coord_cartesian(ylim = c(0,2)) + ggtitle("K-means Centers #2, k = 6")
+#plot genes kmeans, k=6, iteration 2
+ggplot(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(x = `RpoS%`, y = normCountScaled, col = Geneid)) + geom_point(alpha = 0.7) + geom_line(data = filter(allCounts.tidy.filtered, regulation != "NA"), aes(y = meanScaled), alpha = 0.7, linetype = "dashed") + theme(legend.position = "none") + coord_cartesian(ylim = c(0,2)) + facet_grid(.~kmeans.cluster.2) + ggtitle("K-means #2, k = 6") + ylab("Gene Expression")
+
+paste("ARI k-means #1 vs k-means #2; k = 6: ", round(adjustedRandIndex(allCounts.tidy.filtered$kmeans.cluster, allCounts.tidy.filtered$kmeans.cluster.2), 3))
+
+paste("ARI k-means #1 vs PAM; k = 6: ", round(adjustedRandIndex(allCounts.tidy.filtered$kmeans.cluster, allCounts.tidy.filtered$pam.clustering.5), 3)) 
+paste("ARI k-means #2 vs PAM; k = 6: ", round(adjustedRandIndex(allCounts.tidy.filtered$kmeans.cluster.2, allCounts.tidy.filtered$pam.clustering.5), 3))
+```
+
+What we notice from the two above plots is that even with the same input for k (6), k-means yields different clustering results. This is possible within the k-means algorithm because despite the convergence, the random selection of starting centers at the beginning allows for different possibilities for eventual convergence. 
+
+The ARI between two iterations of k-means with the same value of k is low (0.515), confirming what we see in the plots that the two methods do not cluster genes in the same way. Especially as compared to PAM, which gives the same clustering results each time for a constant input of k, using k-means to cluster our genes gives us pause. Comparing the two k-means iterations to the results given by PAM, we also notice that both k-means results are both rather dissimilar to the resutls given by PAM. In conclusion, we prefer the more robust Partitioning Around Medoids approach. 
+
+#Clustering Analysis B. subtilis CodY Data Set
+The published clusters on the B. subtilis data set investigating the CodY regulon (@Brinsmade2014) we clustered according to k-means with 14 clusters and using Pearson correlation as a dissimilarity metric. As we observed different results each time through the k-means algorithm above, we wanted to investigate how similar the clustering would be if we reproduced the k-means clustering. Note that we use k-means from the amap package in R, and Brindsmade et. al used MATLAB, but that is the only difference. We use the same regulon and RPKMO normalized counts provided in the paper. 
+
+Compare to the published findings
+
+```{r}
+publishedNormExp <- read_csv("CodYnormExpression.csv") %>%
+  as.data.frame() %>% dplyr::rename(gene = `Gene/ORF_name,_#`) %>%
+  filter(WT != "NA")
+normCounts <- publishedNormExp %>% select(gene, WT:null) %>%
+  gather(condition, normCount, -gene)
+scalednormCounts <- publishedNormExp %>% select(gene, WT.scaled:null.scaled) %>%
+  gather(condition, normCountScaled, -gene) %>%
+  separate(condition, c("condition", "scaled"), sep = "[.]") %>% select(-scaled)
+publishedNormExp.tidy <- inner_join(normCounts, scalednormCounts)
+#the genes Brinsmade et al. found differentially expressed between null and WT. We use their normalized counts (RPKMO). We will try Person correlation k-means clustering and compare with the clusters they obtained.
+publishedClusters <- read_csv("CodY.clustersPublished.csv", na = c("", "NA")) 
+publishedClusters <- as.data.frame(publishedClusters) %>% select(`1b`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `10`, `11`, `12`, `13`, `14`) %>%
+  filter(row_number() %in% 1:43)
+publishedClusters <- publishedClusters %>%
+  dplyr::rename(`1` = `1b`) %>%
+  gather(published.cluster, gene) %>%
+  filter(gene != "NA")
+
+publishedNormExp.tidy <- inner_join(publishedNormExp.tidy, publishedClusters)
+```
+
+##Kmeans Clustering Comparisons
+
+```{r}
+countsToCluster <- publishedNormExp
+genes <- countsToCluster$gene
+countsToCluster <- countsToCluster %>% select(WT:null)
+rownames(countsToCluster) <- genes
+
+# generate 100 iterations of Kmeans with Pearson Correlation
+set.seed(82) 
+nreps = 100
+kmeans.clusters <- c() 
+kmeans.centers <- c()
+iterations <- c()
+clustNum <- c()
+for(i in seq_along(1:nreps)){
+  kmeans <- Kmeans(countsToCluster, centers = 14, iter.max = 100, method = "pearson")
+  thisCluster <- as.data.frame(kmeans$cluster)
+  kmeans.clusters <- c(kmeans.clusters, thisCluster)
+  theseCenters <- kmeans$centers
+  kmeans.centers <- rbind(kmeans.centers, theseCenters) 
+  iterations <- c(iterations, rep(c(i-1), each = 14))
+  clustNum <- c(clustNum, c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14))
+}
+kmeans.centers <- as.data.frame(kmeans.centers) %>% mutate(iteration = iterations, cluster = clustNum) 
+kmeans.centers <- kmeans.centers %>% rowwise() %>% mutate(scaler = max(WT, null)) %>%
+  gather(condition, normCount, -iteration, -cluster, -scaler) %>% mutate(normCountScaled = normCount/scaler)
+
+kmeans.clusters <- as.data.frame(kmeans.clusters) %>% mutate(gene = publishedNormExp$gene)
+
+publishedNormExp.tidy <- inner_join(publishedNormExp.tidy, kmeans.clusters)
+
+#Adjusted Rand Vector Published Clusters vs. Each Iteration
+ARI <- c(adjustedRandIndex(publishedNormExp.tidy$published.cluster, publishedNormExp.tidy$kmeans.cluster))
+         #do separately because format is different
+         #add rest of columns
+for(i in seq_along(1:99)){
+  clust <- unlist(select(publishedNormExp.tidy, paste("kmeans.cluster", i, sep = ".")))
+  ARI <- c(ARI, adjustedRandIndex(publishedNormExp.tidy$published.cluster, clust))
+}
+
+hist(ARI, breaks = 20, main = "Plot Adjusted Rand for Published Clustering versus 100 Iterations of Kmeans", xlab = "Adjusted Rand Index for Published Clustering vs Iterations of Kmeans")
+```
+
+We notice the changes in clustering and centers in each run of the kmeans algorithm. After calculating the Adjusted Rand Index for the published clustering results (@Brinsmade2014) versus the clustering given by each iteration of Kmeans we perform above, we see the distribution of Adjusted Rand Indices varies between around 0.3 and 0.5. This tells us that the published results agree with our iterations of Kmeans better than completely random assignment (ARI = 0), but not much better than that.
+
+```{r}
+#focus on two randomly selected genes
+set.seed(58)
+sample(1:100, 1) #choose a random iteration. We'll do the 33rd (which is stored as kmeans.cluster.32)
+#plot
+ggplot(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, col = gene)) + geom_point(alpha = 0.7) + theme(legend.position = "none") + facet_grid(.~kmeans.cluster.33) + ggtitle("K-means #1, k = 14") + ylab("Gene Expression") + geom_line(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, group = gene), linetype = "dashed") + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null"))
+  
+#view centers
+ggplot(data = filter(kmeans.centers, iteration == 33), aes(x = condition, y = normCountScaled)) + facet_grid(.~cluster) + geom_line(aes(group = 1)) + geom_point() + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null"))+ ggtitle("K-means #1, k = 14, centers")
+
+set.seed(59)
+sample(1:100, 1) # choose another random iteration
+ggplot(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, col = gene)) + geom_point(alpha = 0.7) + theme(legend.position = "none") + facet_grid(.~kmeans.cluster.4) + ggtitle("K-means #2, k = 14") + ylab("Gene Expression") + geom_line(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, group = gene), linetype = "dashed") + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null"))
+  
+#view centers
+ggplot(data = filter(kmeans.centers, iteration == 4), aes(x = condition, y = normCountScaled)) + facet_grid(.~cluster) + geom_line(aes(group = 1)) + geom_point() + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null"))+ ggtitle("K-means #2, k = 14, centers")
+
+paste("Adjusted Rand Index for K-means33 vs K-means4: ", round(adjustedRandIndex(publishedNormExp.tidy$kmeans.cluster.33, publishedNormExp.tidy$kmeans.cluster.4), 3))
+```
+
+The two randomly-selected kmeans iterations plotted above both happen to demonstrate empty clusters, which is a phenomenon possible in the kmeans algorithm. This phenomenon may suggest the number for k is wrong, and that the data is overfit. One can see an example of the Kmeans algorithm producing an empty cluster here (http://user.ceng.metu.edu.tr/~tcan/ceng465_f1314/Schedule/KMeansEmpty.html). This problem and a solution in the form of a modified K-means algorithm has been introduced (@Pakhira2009).
+
+##PAM on B. subtilis Data
+Kmeans does not have an equivalent measure of silhouette width as in PAM. We are curious about the silhouette width on the B. subtilis data with 14 clusters, and so we use PAM to cluster the genes.
+
+```{r}
+dissimilarity.matrix <- 1 - cor(t(countsToCluster), method = "pearson")
+pam.CodY <- pam(dissimilarity.matrix, k = 14)
+
+pam.CodY.medoids <- data.frame(rownames(pam.CodY$medoids),  pam.CodY$silinfo$clus.avg.widths)
+# contains the names of the genes which are the medoids for each cluster (around which each cluster is centered) and the silhouette width of each cluster: the larger the silhouette width, the more distinct that cluster is from the others. 
+pam.CodY.clusters <- data.frame(pam.CodY$clustering)
+genes <- rownames(pam.CodY.clusters) # extract Geneids
+pam.CodY.clusters <- pam.CodY.clusters %>% mutate(gene = genes)
+publishedNormExp.tidy <- left_join(publishedNormExp.tidy, pam.CodY.clusters) #store information with publishedNormExp.tidy
+
+medoids.toplot <- filter(publishedNormExp.tidy, gene %in% pam.CodY.medoids$rownames.pam.CodY.medoids.)
+
+ggplot(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, col = gene)) + geom_point(alpha = 0.7) + theme(legend.position = "none") + facet_grid(.~pam.CodY.clustering) + ggtitle(paste("PAM k = 14, average silhouette width = ", round(pam.CodY$silinfo$avg.width,3))) + ylab("Gene Expression") + geom_line(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, group = gene), linetype = "dashed") + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null")) + geom_line(data = medoids.toplot, aes(y = normCountScaled, group = 1), col = "black", alpha = 0.5)
+```
+
+The silhouette width is not the worst, but let's see if it could be any higher: 
+
+```{r}
+pam.CodY <- pam(dissimilarity.matrix, k = 2)
+paste("Average Silhouettte Width, k = 2 is", round(pam.CodY$silinfo$avg.width, 3))
+# change the input for k to see other silhouette widths for different k
+```
+
+The silhouette width is highest at k = 2, probably denoting the up- and down-regulation as seen in our data. The silhouette width stabilizes at around 0.44 between 5 and 8 clusters. Plotting with 7 clusters, with the highest silhouette width for k = 5-8, we obtain:
+
+```{r}
+dissimilarity.matrix <- 1 - cor(t(countsToCluster), method = "pearson")
+pam.CodY <- pam(dissimilarity.matrix, k = 7)
+
+pam.CodY.medoids <- data.frame(rownames(pam.CodY$medoids),  pam.CodY$silinfo$clus.avg.widths)
+pam.CodY.clusters7 <- data.frame(pam.CodY.clustering7 = pam.CodY$clustering)
+genes <- rownames(pam.CodY.clusters7) # extract Geneids
+pam.CodY.clusters7 <- pam.CodY.clusters7 %>% mutate(gene = genes)
+publishedNormExp.tidy <- left_join(publishedNormExp.tidy, pam.CodY.clusters7) #store information with publishedNormExp.tidy
+
+medoids.toplot <- filter(publishedNormExp.tidy, gene %in% pam.CodY.medoids$rownames.pam.CodY.medoids.)
+
+ggplot(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, col = gene)) + geom_point(alpha = 0.7) + theme(legend.position = "none") + facet_grid(.~pam.CodY.clustering7) + ggtitle(paste("PAM k = 7, average silhouette width = ", round(pam.CodY$silinfo$avg.width,3))) + ylab("Gene Expression") + geom_line(data = publishedNormExp.tidy, aes(x = condition, y = normCountScaled, group = gene), linetype = "dashed") + scale_x_discrete(limits = c("WT", "F71Y","R61K","R61H", "null")) + geom_line(data = medoids.toplot, aes(y = normCountScaled, group = 1), col = "black", size = 1.1, alpha = 0.5)
+```
+
+We see in the clustering with k = 7, the same shapes are represented as in the k = 14 clustering. However, to make distinction between clusters with and without monotonicity, more clusters than 7 appear needed.  
+
+# Future Work
+1) Assess the problems and concerns we have with this data set (see Questions_Regarding_2017_Data and Taxonomy_Matchup), possibly resequencing or redoing the experiment/
+2) We that the majority of raw read counts in each sample belonged to the region which contains ssrA, a tmRNA. It would be interesting to know if this high level of ssrA is expected under our experimental constants (such as starvation). See Taxonomy_Matchup #3 for more information. 
+3) Assess our clustering techniques with simulations of randomly generated RNASeq counts using R packages such as ballgown and polyester. 
+
+
+# References

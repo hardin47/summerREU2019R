@@ -1,0 +1,249 @@
+---
+title: "Taxonomy_Matchup"
+author: "Madison Hobbs"
+date: "7/5/2017"
+output: pdf_document
+---
+
+# Match up allCounts with the NCBI Taxonomy
+```{r setup, include=FALSE, warning = F, message = F}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(tibble)
+allCounts <- read.csv("DMS2670_LB_NC_000913.tsv", header = T, sep = "\t")
+taxonomyNCBI <- read.table("NC_000913.gff", header = T, sep = "\t") %>%
+  dplyr::rename(Geneid = ID.id0.Name.ANONYMOUS.Dbxref.taxon.511145.Is_circular.true.gbkey.Src.genome.chromosome.mol_type.genomic.DNA.strain.K.12.substrain.MG1655)
+```
+```{r, echo=F, warning=F, warning = F, message = F}
+#what does a bnumber look like?
+bnum = "b[0-9]{4}"
+#store that as its own column
+taxonomyNCBI <- as.data.frame(taxonomyNCBI)
+taxonomyNCBI$bnum <- str_extract(taxonomyNCBI$Geneid, bnum)
+# what does a genename look like?
+genename = "Name=....."
+# what does an id look like?
+ID = "ID=........"
+#store genenames and ids in the same column, genename if we are CDS (aka region = "gene" and id otherwise)
+taxonomyNCBI$genename <- case_when(
+    taxonomyNCBI$region == "gene" ~ str_extract(taxonomyNCBI$Geneid, genename),
+    TRUE ~ str_extract(taxonomyNCBI$Geneid, ID))
+
+#taxonomyNCBI <- taxonomyNCBI %>% group_by(Geneid) %>%
+  #mutate(genename = case_when(
+    #region == "gene" ~ str_extract(Geneid, genename),
+    #TRUE ~ str_extract(Geneid, ID)))
+```
+```{r, echo=F, warning = F, message = F}
+#put it all together!
+taxonomyNCBI <- taxonomyNCBI %>% 
+  filter(region %in% c("CDS") == FALSE) %>%
+  separate(genename, into = c("name","genename"), sep = "=") %>%
+  separate(genename, into = c("genename", "semicolon", sep=";")) %>%
+  select(NC_000913.3, RefSeq, region, X1, X4641652, Geneid, bnum, genename)
+```
+```{r, echo=F, warning = F, message = F}
+allCounts$GeneidBackup = allCounts$Geneid
+allCounts <- allCounts %>% separate(GeneidBackup, c("feature", "rest"), sep="[:]")
+allCounts <- allCounts %>% select(Geneid, feature,                                           "0.00_A" = A0,
+         "0.00_B" = B0,
+         "0.00_C" = C0,
+         "0.35_A" = A10..5,
+         "0.35_B" = B10..5,
+         "0.35_C" = C10..5,
+        "11.59_A" = A5x10.5,
+         "11.59_B" = B5x10.5,
+        "11.59_C" = C5x10.5,
+        "20.40_A" = A10..4,
+        "20.40_B" = B10..4,
+        "20.40_C" = C10..4,
+        "48.37_A" = A10..3,
+        "48.37_B" = B10..3,
+        "48.37_C" = C10..3,
+       "100.00_A" = A2537,
+       "100.00_B" = B2537,
+       "100.00_C" = C2537,
+       "129.96_A" = A2x10..3,
+       "129.96_B" = B2x10..3,
+       "129.96_C" = C2x10..3,
+       "190.38_A" = A5x10..3,
+       "190.38_B" = B5x10..3,
+       "190.38_C" = C5x10..3)
+
+# IGR's separate: 
+# do start.bnum end.bnum start.genename end.genename
+# left join igrs to allCounts
+genename = ",[a-z]{3}[A-Z,]."
+rna.name = ",rna[0-9].."
+igr <- allCounts %>% filter(feature %in% c("IGR", "AS_IGR"))
+igr$GeneidBackup = igr$Geneid
+igr <- igr %>% separate(GeneidBackup, c("Geneid1", "Geneid2"), sep = "[/]")
+igr$feature1 <- separate(igr, Geneid1, c("feature1", "rest"), sep = "[,]")$feature1
+igr$feature1 <- separate(igr, feature1, c("rest", "feature1"), sep = "[()]")$feature1
+igr$feature2 <- separate(igr, Geneid2, c("feature2", "rest"), sep = "[,]")$feature2
+igr$start.gene <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, genename),
+    TRUE ~ str_extract(igr$Geneid1, rna.name))
+igr$end.gene <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, genename),
+    TRUE ~ str_extract(igr$Geneid2, rna.name))
+igr$start.bnum <- case_when(
+    igr$feature1 == "CDS" ~ str_extract(igr$Geneid1, bnum),
+    TRUE ~ "none")
+igr$end.bnum <- case_when(
+    igr$feature2 == "CDS" ~ str_extract(igr$Geneid2, bnum),
+    TRUE ~ "none")
+igr <- igr %>% separate(start.gene, into = c("comma", "start.gene"), sep = "[,]") %>% select(-comma) %>% separate(end.gene, into = c("comma", "end.gene"), sep = "[,]") %>% select(-comma)
+allCounts <- full_join(igr, allCounts)
+```
+```{r, echo=F, warning = F, message = F}
+# CDS
+# have bnum and genename columns
+# left join to allCounts
+genename = ":[a-z]{3}.."
+cds <- allCounts %>% filter(feature %in% c("AS_CDS", "CDS")) 
+cds$genename <- str_extract(cds$Geneid, genename)
+cds$bnum <- str_extract(cds$Geneid, bnum)
+cds <- cds %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(allCounts, cds)
+```
+```{r, echo=F, warning = F, message = F}
+#ncRNA
+#ncRNA doesn't have bnums, but id's which we'll put in the genename column
+rna.name = ":rna[0-9].."
+rna <- allCounts %>% filter(feature %in% c("ncRNA", "AS_ncRNA")) 
+rna$genename <- str_extract(rna$Geneid, rna.name)
+rna <- rna %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(rna, allCounts)
+
+#rRNA
+rRNA <- allCounts %>% filter(feature %in% c("rRNA", "AS_rRNA")) 
+rRNA$genename <- str_extract(rRNA$Geneid, rna.name)
+rRNA <- rRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(rRNA, allCounts)
+
+#tRNA
+tRNA <- allCounts %>% filter(feature %in% c("tRNA", "AS_tRNA")) 
+tRNA$genename <- str_extract(tRNA$Geneid, rna.name)
+tRNA <- tRNA %>% separate(genename, into = c("colon", "genename"), sep = ":") %>%
+  select(-colon)
+allCounts <- full_join(tRNA, allCounts)
+```
+
+```{r, echo=F,  warning= F, message=F}
+# make tidy data
+#countsTable.all.tidy <- allCounts %>%
+  #gather(cond.samps, rawCount, -Geneid, -geneLabel, -feature, -genename)
+```
+
+##Question 1: Are there duplicates? 
+Answer: yes. 
+```{r, echo=F,  warning= F, message=F}
+####HERE ARE THE GENES WHICH ARE REPEATED IN THE NCBI TAXONOMY####
+repeated.taxonomyNCBI <- filter(taxonomyNCBI %>% group_by(genename) %>% summarise(numAppearances = n()), numAppearances > 1) %>% ungroup()
+repeated.taxonomyNCBI <- inner_join(repeated.taxonomyNCBI, taxonomyNCBI, by = "genename") %>% select(genename, bnum, numAppearances, Geneid)
+repeated.taxonomyNCBI <- repeated.taxonomyNCBI %>% group_by(Geneid) %>% filter(row_number() == 1) %>% ungroup()# shows all Geneids are distinct 
+
+repeated.cds <- filter(cds %>% group_by(genename, feature) %>% summarise(numAppearances = n()), numAppearances > 1) %>% ungroup()
+repeated.cds <- inner_join(repeated.cds, cds) %>% select(genename, bnum, feature, numAppearances, Geneid)
+repeated.cds <- repeated.cds %>% group_by(Geneid) %>% filter(row_number() == 1) %>% ungroup()# shows all Geneids are distinct
+
+#matching up?
+matchup.tax.us <- inner_join(repeated.taxonomyNCBI, repeated.cds, by = c("genename", "bnum"))
+distinct.genename <- matchup.tax.us %>% summarise(numDistinct.genename = n_distinct(genename))
+distinct.bnum <- matchup.tax.us %>% summarise(numDistinct.bnum = n_distinct(bnum))
+
+#stuff that's only in the taxonomy
+nomatch.tax.us <- anti_join(repeated.taxonomyNCBI, repeated.cds, by = c("genename", "bnum")) # no data available; there are none!
+#stuff that's only in our data
+nomatch.us.tax <- anti_join(repeated.cds, repeated.taxonomyNCBI, by = c("genename", "bnum"))
+distinct.nomatch.us.tax <- nomatch.us.tax %>% group_by(genename, bnum) %>% filter(row_number() == 1)
+#where are they in the taxonomy?
+find <- left_join(nomatch.us.tax, taxonomyNCBI, by = c("genename", "bnum"))
+```
+There are no CDS/AS_CDS genes whose Geneid is duplicated in our data. However, there are 68 genes whose genename is duplicated. The CDS always have the same number as the AS_CDS. Most appear twice, but some appear 7 (insA) or 11 (insH1) times for CDS and AS_CDS each. 
+
+The vast majority (59) have the same bnumber across repetitions of a genename, but some do not, and these are: insA, insB1, insC1, insD1, insE1, insF1, insH1, insI1, and insL1. For the genes that have the same bnum across repetitions of a genename, they have a different number at the end of their Geneid : for example, for b4494 arpB, it has 1475:NC_000913.3 and 425:NC_000913.3. 
+
+Fortunately, the taxonomy repeats genes too! The only genes repeated in the taxonomy are CDS. There are no genes which are repeated in the taxonomy and which are not repeated in our data. 27 genes (matching genenames; 73 when matching bnums) are repeated in both the taxonomy and our data.  Of the CDS/AS_CDS genes of our data, there are 41 genes which are repeated in our data but aren't repeated in the taxonomy data. All of these genes are to be found in the taxonomy, although they are not repeated.
+
+For genes that were repeated in the taxonomy and which shared the same bnumber (these coincided exactly with our genes sharing numbers or not), the genes in the taxonomy would say a different "part" like for crl b0204, they have part=2%2F2 or part = 1%2F2. 
+
+##Question 2: How well do our genes match up with the taxonomy? 
+```{r, echo=F,  warning= F, message=F}
+inboth <- inner_join(allCounts, taxonomyNCBI, by = c("genename", "bnum"))
+# check for non-matching CDS; there is none:
+justus <- anti_join(filter(allCounts, feature %in% c("CDS", "AS_CDS")), filter(taxonomyNCBI, region == "gene"), by = c("genename", "bnum"))
+#are there genes in the taxonomy which aren't in our data?
+justthem <- anti_join(filter(allCounts, feature %in% c("CDS", "AS_CDS")), filter(taxonomyNCBI, region == "gene"), by = c("genename", "bnum"))
+# nope!
+
+# check for non-matching RNA; there is none
+us <- sort(na.omit(unique(filter(allCounts, feature == "ncRNA")$genename)))
+tax <- sort(unique(filter(taxonomyNCBI, region == "ncRNA")$genename))
+together <- data.frame(us, tax)
+#tRNA -- they all match between the taxonomy and us.
+us <- sort(na.omit(unique(filter(allCounts, feature == "tRNA")$genename)))
+tax <- sort(unique(filter(taxonomyNCBI, region == "tRNA")$genename))
+together <- data.frame(us, tax)
+#rRNA -- also all match betwen the taxonomy and us.
+us <- sort(na.omit(unique(filter(allCounts, feature == "rRNA")$genename)))
+tax <- sort(unique(filter(taxonomyNCBI, region == "rRNA")$genename))
+together <- data.frame(us, tax)
+
+```
+
+There are no CDS or ncRNA genes which are in the taxonomy that are not in our data. There are also no CDS or ncRNA genes which are in our data that are not in the taxonomy!
+There are the same number of rRNA (22) and tRNA (89) in each data set, but I didn't expressly check them to be the same. 
+
+##Question 3: IGR's
+```{r, echo=F, warning= F, message=F}
+ourIGRs <- igr %>% select(Geneid, start.gene, end.gene) %>% gather(position, genename, -Geneid) %>%
+  separate(position, c("position", "unnecessary"), sep = "[.]") %>% select(-unnecessary)
+bnums <- igr %>% select(Geneid, start.bnum, end.bnum) %>% gather(position, bnum, -Geneid) %>%
+  separate(position, c("position", "unnecessary"), sep = "[.]") %>% select(-unnecessary)
+ourIGRs <- inner_join(ourIGRs, bnums, by = c("Geneid", "position"))
+taxonomyOrder <- filter(taxonomyNCBI, region %in% c("repeat_region", "exon", "region", "STS") == FALSE) %>% select(genename, bnum, region, Geneid)
+taxonomyOrder <- taxonomyOrder %>% mutate(index = seq(1:nrow(taxonomyOrder)))
+         
+sideByside <- left_join(taxonomyOrder, ourIGRs, by = c("genename", "bnum")) %>%
+  dplyr::rename(Geneid.them = Geneid.x, Geneid.us = Geneid.y)
+# where are those?
+sideByside <- sideByside %>% group_by(Geneid.us) %>% mutate(diff = index[2] - index[1], numGenesBtwn = diff-1)
+badones <- filter(sideByside, numGenesBtwn > 0, Geneid.us != "NA") # whereever Geneid.y = "NA", that means we don't have 
+
+##what are the genes missing in those regions between IGR start and end genes?
+theGaps <- badones %>% dplyr::select(position, index) %>% spread(position, index)
+library(plyr)
+theGaps <- ddply(theGaps, "Geneid.us", summarise, index = seq(start, end))
+detach("package:plyr", unload = T)
+theGaps <- left_join(taxonomyOrder, badones) %>% filter(index %in% theGaps$index)
+
+#IGRtroublemakers <- data.frame(unique(theGaps$Geneid.us)) %>% filter(unique(theGaps$Geneid.us) != "NA")
+#colnames(IGRtroublemakers) <- "Geneid.us"
+#IGRtroublemakers
+```
+
+NOTE: I removed rows in taxonomy of region "repeat region," "exon," "region," and "STS." They are easy for me to add back in if we'd like to see where those are being skipped over as well. 
+
+These are the IGR's which have genes between them:  
+
+• insL1 (b0016) and hokC (b4412) have mokC (b0018) between them.
+
+• narI (b1227) and tpr (b1229) have rttR (b4425) and ncRNA rna40 between them.
+
+• hcaT (b2536) and iroK (b4706) have hcaR (b2537) between them.
+
+• hcaR (b2537) and hcaE (b2538) have iroK (b4706) between them.
+
+• smpB (b2620) and intA (b2622) have ssrA (b2621) and tmRNA rna88 between them (of course it does; if you remember this is the gene with the highest read counts; in the millions!)
+
+• ypjF (b2646) and ypjA (b2647) have psaA (b4645) and tmRNA rna89 between them.
+
+• cspA (b3556) and hokA (b4455) have mokA (b4647) between them. 
+
+• mokA (b4647) and insJ (b3557) have hokA (b4455) between them.

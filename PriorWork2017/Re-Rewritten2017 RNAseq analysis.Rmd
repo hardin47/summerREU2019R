@@ -1,0 +1,1583 @@
+---
+title: "Re-Rewritten2017 Analysis of RNAseq at different RpoS levels"
+author: "Madison Hobbs"
+date: "5/25/2017"
+output: pdf_document
+---
+#Introductory Remarks
+
+This analysis is rewrite of a rewritten RNAseq analysis by Dr. Dan Stoebel and Garrett Wong. The methods they employed are reproduced using DESeq2 and the code now implements the tidyverse.
+
+This analysis uses three RpoS levels, 0% (knockout), 26% (low), and 100% (wild type). The 26% is the estimate from experiments that had 5 biological replicates, with one technical replicate per sample. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# this line outputs all images to a folder named rerewrittenpics. Note that we specify the figure width ad height, as well as the type (jpeg) and dpi (resolution)
+knitr::opts_chunk$set(fig.width = 30, fig.height = 10, dev = "jpeg", 
+        fig.align = 'center', fig.keep="all", fig.path = "rerewrittenpics/", dpi = 500)
+#this line creates a cache for all the code so that each time we run it, it won't take as much time
+knitr::opts_chunk$set(cache = TRUE)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library("DESeq2")
+library("vsn")
+library("hexbin")
+library("corrplot")
+
+# load in the old findings ~ Dr. Stoebel and Garrett
+oldFindings <- read.csv("~/Desktop/HHMI/oldFindings.csv") %>%
+  mutate(genename = geneName)
+# read in the old categories so that we can compare and assure that my code is being rewritten properly and to compare DESeq to DESeq2 and the profile assignment technique (later)
+old.sens.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "sensitive")
+old.sens.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "sensitive")
+old.insens.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "insensitive")
+old.insens.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "insensitive")
+old.linear.pos <- oldFindings %>% filter(Direction.of.regulation == "posRegulation", sensitivity == "linear")
+old.linear.neg <- oldFindings %>% filter(Direction.of.regulation == "negRegulation", sensitivity == "linear")
+```
+
+The original data actually had four levels, but Dr. Stoebel says, "I don't trust the fourth level which was greater than 100% of wild type. I don't trust it because the RNAseq samples were pooled across two different runs, which makes me nervous. Therefore, I'm going to drop those samples." Thus, although there exists counts for 4 conditions: ko ("knockout," 0% RpoS), lo ("low," 26% RpoS), wt ("wildtype," 100% RpoS), and hi (>100% Rpos), we will use only ko, lo, and wt in the analysis.
+
+We start by making the count tables for the analysis. We make four count tables, one with all four levels (countsTable.4Cond), one with only knockout and wildtype (countsTable.0.100), one with only the low and wildtype conditions (countsTable.26.100), and one with only the knockout and low conditions (countsTable.0.26). This will allow us to compare conditions pairwise. 
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+#load in full counts for all genes at the four levels (2 replicates for each gene)
+allCounts_new <-read.delim("~/Desktop/github/rpoS-regulon/allCounts_new.txt")
+rownames(allCounts_new) = allCounts_new$X
+#allCounts_new <- rename(allCounts_new, geneid = X)
+colnames(allCounts_new) <- c("geneid", "wt1", "ko1", "lo1", "hi1", "wt2", "ko2", "lo2", "hi2")
+countsTable.4Cond <- allCounts_new
+
+#make a countsTable with ONLY the ko and wt conditions 
+countsTable.0.100 <- select(countsTable.4Cond, ko1, ko2, wt1, wt2)
+
+#make a countsTable with ONLY the lo and wt conditions 
+countsTable.26.100 <- select(countsTable.4Cond, lo1, lo2, wt1, wt2)
+
+#make a countsTable with ONLY the ko and lo conditions
+countsTable.0.26 <- select(countsTable.4Cond, ko1, ko2, lo1, lo2)
+```
+
+We now conduct the analysis on three pairwise comparisons: 0 vs. 100 (knockout vs. wildtype), 26 vs. 100 (low vs. wildtype), and 0 vs. 26 (knockout vs. low). This involves creating a count data set for just those samples, estimating size factors and dispersions, and then performing the negative binomal test. We then save all of the p-values into one large table.
+
+##############################################
+# Knockout (0%) vs. WildType (100%) Analysis #
+##############################################
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+##############################################
+# Knockout (0%) vs. WildType (100%) Analysis #
+##############################################
+
+# make a DESeqDataSet for DESeq2 to work on
+# define conditions
+condition.0.100 <- as.factor(c("ko","ko","wt","wt")) #column names
+#give DESeq the column names from countsTable
+coldata.0.100 <- data.frame(row.names = colnames(countsTable.0.100), condition.0.100) 
+# create the DESeqDataSet
+# cds stands for "count data set"
+cds.0.100 <- DESeqDataSetFromMatrix(countData = countsTable.0.100, colData = coldata.0.100, design= ~ condition.0.100)
+
+cds.0.100 <- DESeq(cds.0.100)
+#note: cds means "Coding DNA Sequence"
+# DESeq() estimates the size factors, dispersion, and p-values for differential expression using nbinomWaldTest
+# cds.0.100 is a DESeq Data Set, so it doesn't behave nicely like a data frame. It has a BUNCH of attributes that we can extract and turn into data frames, though! You'll see.
+
+#Play around with some DESeq2 exploratory functions! Find more in the Vignette which is really helpful!
+results.0.100 <- results(cds.0.100, alpha = 0.05)
+summary(results.0.100) # this beautiful little line gives us a table of the significantly (at specified alpha) up and down regulated genes
+plotMA(results.0.100, ylim = c(-3, 3), alpha = 0.05) #shows relationship between mean normalized counts and the log fold change across conditions.
+# find the minimum normalized count at each sample
+d <- plotCounts(cds.0.100, gene = which.min(results.0.100$padj), intgroup = colnames(coldata.0.100), returnData = TRUE)
+# in ggplot which helps us visualize how different the normalized read counts are across the different ssamples
+ggplot(d, aes(x = condition.0.100, y = count)) + geom_point(position = position_jitter(w=0.1, h=0)) + scale_y_log10()
+
+mcols(results.0.100)$description
+resultsNames(cds.0.100)
+
+# by how much do size fators vary?
+sizeFactors(cds.0.100)
+max(sizeFactors(cds.0.100)) - min(sizeFactors(cds.0.100))
+sd(sizeFactors(cds.0.100))
+# not by much! That's a nice thing; it tells us that the sequencing depth is not so different between the samples. 
+```
+The plot shows the log2 fold changes 0% versus 100% and the mean of the normalized counts across both samples. Red points indicate an FDR-adjusted p-value of less than 0.05, and points falling outside the window get an open triange pointing up or down depending where that point is located. These log fold changes are already shrunk so that genes with low counts and high dispersion are shrunk more, and the effects of the low count and high dispersion is mitigated.
+
+Of the 4343 (out of 4497) genes with nonzero total read count, 1350 are differentially expressed between kncokout and wildtype conditions. Of these, 748 (17% of total) are upregulated and 602 (14% of total). We identify no outliers, but we do identify many low mean counts (mean count < 4 for 589 genes, 14% of total). Low mean counts can give us higher dispersion, so this is something to watch out for, but we will use LFC shrinkage to mitigate this. 
+
+The size factors do not appear to vary wildly (range of 0.49 and standard deviation of 0.20). This hints that the sequencing depths across samples do not vary widely.
+##########################################
+# Low (26%) vs. WildType (100%) Analysis #
+##########################################
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+##########################################
+# Low (26%) vs. WildType (100%) Analysis #
+##########################################
+
+# make a DESeqDataSet to work with
+# define conditions
+condition.26.100 <- as.factor(c("lo", "lo", "wt", "wt"))
+# give DESeq the column names from countsTable.26.100
+coldata.26.100 <- data.frame(row.names = colnames(countsTable.26.100), condition.26.100)
+# generate the DeqSetDataSet
+cds.26.100 <- DESeqDataSetFromMatrix(countData = countsTable.26.100, colData = coldata.26.100, design = ~ condition.26.100)
+
+cds.26.100 <- DESeq(cds.26.100)
+
+results.26.100 <- results(cds.26.100, alpha = 0.05)
+summary(results.26.100)
+plotMA(results.26.100, ylim = c(-3, 3), alpha = 0.05)
+
+# by how much do size fators vary?
+sizeFactors(cds.26.100)
+sd(sizeFactors(cds.26.100))
+```
+Of the 4349 (out of 4497) genes with nonzero total read count across the 26% and 100% conditions, 730 are differentially expressed between kncokout and wildtype conditions. Of these, 364 (8.4% of total) are upregulated and 366 (8.4% of total) are downregulated. We identify no outliers, but we do identify many low mean counts (mean count < 11 for 1094 genes, 25% of total). Low mean counts can give us higher dispersion, so this is something to watch out for, but we will use LFC shrinkage to mitigate this.
+
+The size factors again do not vary by that much with a range of 0.575 and standard deviation of 0.241. 
+
+########################################
+# Knockout (0%) vs. Low (26%) Analysis #
+########################################
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+########################################
+# Knockout (0%) vs. Low (26%) Analysis #
+########################################
+
+# create the conditions 
+condition.0.26 <- as.factor(c("ko", "ko", "lo", "lo"))
+# give the column names
+coldata.0.26 <- data.frame(row.names = colnames(countsTable.0.26), condition.0.26)
+# create the DESeqDataSet
+cds.0.26 <- DESeqDataSetFromMatrix(countData = countsTable.0.26, colData = coldata.0.26, design = ~ condition.0.26)
+
+cds.0.26 <- DESeq(cds.0.26)
+results.0.26 <- results(cds.0.26, alpha = 0.05)
+summary(results.0.26)
+plotMA(results.0.26, ylim = c(-1, 4), alpha = 0.05)
+
+# by how much do our size factors vary?
+max(sizeFactors(cds.0.26)) - min(sizeFactors(cds.0.26))
+sd(sizeFactors(cds.0.26))
+```
+Of the 4348 (out of 4497) genes with nonzero total read count across the 0% and 26% conditions, 355 are differentially expressed between kncokout and wildtype conditions. Of these, 327 (7.5% of total) are upregulated and 28 (0.64% of total) are downregulated. We identify no outliers, but we do identify many low mean counts (mean count < 3 for 504 genes, 12% of total).
+
+The size factors do not vary by much once again with a range of 0.408 and standard deviation of 0.190. 
+
+Now, we combine all of the FDR-adjusted p-values for each pairwise comparison into one table. Note that we use FDR-adjusted p-values to account for the additional likelihood of making a Type I error for each hypothesis test we conducted (and in differential expression analysis, there were a LOT of hypothesis tests!). We use FDR as opposed to Bonferroni because we have conducted so many hypothesis tests in the process of DESeq2 that using Bonferroni would be far too conservative, yielding almost no significant results.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# form a data.frame of all the FDR adjusted p-values from all three pairwise DE analyses
+allFDRAdjP <- data.frame(results.0.100$padj, results.26.100$padj, results.0.26$padj)
+# name allFDRAdjP columns and rows
+colnames(allFDRAdjP) <- c("pvalFDR.Knockout.WildType", "pvalFDR.Low.WildType", "pvalFDR.Knockout.Low")
+rownames(allFDRAdjP) <- rownames(countsTable.4Cond)
+```
+
+In the previous code by Dr. Stoebel and Garrett, a Bonferoni adjustment was used to account for the three pairwise comparisons. However, the only one of those three comparisons with which we will move forward is the 0% vs 100%, used to determine our regulon. Therefore, Dr. Hardin, Dr. Stoebel and I have determined that no Bonferroni adjustment is necessary. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# the previous code, Dr. Stoebel and Garrett's, used a Bonferoni adjustment to account for the three pairwise comparisons. However, the only one of those three comparisons with which we will move forward is the 0% vs 100%, used to determine our regulon. Therefore, Dr. Hardin, Dr. Stoebel and I have determined that no Bonferroni adjustment is necessary. 
+#allFDRAdjP %>%
+  #select(pvalFDR.Knockout.WildType) %>%
+  #filter(pvalFDR.Knockout.WildType < 0.05/3) %>%
+  #summarise(Knockout_vs_WildType_DEGenes = length(pvalFDR.Knockout.WildType))
+
+```
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# how many of the genes are significantly differentially expressed across each pairwise comparison?
+summary(allFDRAdjP < (0.05))
+```
+
+1350 genes were differentially expressed between Knockout and Wild-type condiitons (compare to 1044 previously), 570 genes were differentially expressed between Low and Wild-type conditions, and 299 genes were differentially expressed between Knocout and Low conditions. 
+
+Now, we determine into which of the three possibile significance categories each gene falls. The three possible significance categories are: gene is significant for one pairwise comparison, gene is significant for two pairwise comparisons, or gene is significant for three pairwise comparisons. We create a Venn Diagram reflecting these categories. Here, we will reintroduce the Bonferroni adjustment because we are making multiple comparisions. 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# add three new boolean variables (columns) to allFDRAdjP to say if each pairwise comparison was deemed to be significant for that gene. Add another column (DEacrossAll) to say if all three pairwise comparisons reveal a gene to be DE. 
+allFDRAdjP <- allFDRAdjP %>%
+  # note: bonferroni-adjusted alpha
+  mutate(isDE.KO.WT = ifelse(pvalFDR.Knockout.WildType < 0.05, TRUE, FALSE),
+        isDE.LO.WT = ifelse(pvalFDR.Low.WildType < 0.05, TRUE, FALSE),
+        isDE.KO.LO = ifelse(pvalFDR.Knockout.Low < 0.05, TRUE, FALSE),  
+        DEacrossAll = ifelse(pvalFDR.Knockout.WildType < 0.05/3 & 
+                                pvalFDR.Low.WildType < 0.05/3 &
+                                pvalFDR.Knockout.Low < 0.05/3, TRUE, FALSE),
+        # bonferroni adjustment here to adjust for the three comparisons
+        DEacrossAny = ifelse(isDE.KO.WT | isDE.LO.WT | isDE.KO.LO, TRUE,
+            FALSE),
+        geneid = rownames(countsTable.4Cond))
+rownames(allFDRAdjP) = rownames(countsTable.4Cond)
+#note - mutate will get rid of your row names, so we're adding them back in as a new column and as new rownames
+
+# create more convenient variable references to use in Venn Diagram
+TableForVenn <- allFDRAdjP %>% filter(pvalFDR.Knockout.WildType < 0.05/3, pvalFDR.Low.WildType < 0.05/3, pvalFDR.Knockout.Low < 0.05/3) #Bonferroni adjustment
+DE_ko_wt <- TableForVenn$isDE.KO.WT
+DE_lo_wt <- TableForVenn$isDE.LO.WT
+DE_ko_lo <- TableForVenn$isDE.KO.LO
+vennFactors <- factor(  0*(!DE_ko_wt& !DE_lo_wt & !DE_ko_lo) +
+                          1*(!DE_ko_wt& !DE_lo_wt &  DE_ko_lo) + 
+                          2*(!DE_ko_wt&  DE_lo_wt & !DE_ko_lo) + 
+                          3*(!DE_ko_wt&  DE_lo_wt &  DE_ko_lo) +
+                          4*( DE_ko_wt& !DE_lo_wt & !DE_ko_lo) +
+                          5*( DE_ko_wt& !DE_lo_wt &  DE_ko_lo) + 
+                          6*( DE_ko_wt&  DE_lo_wt & !DE_ko_lo) +
+                          7*( DE_ko_wt&  DE_lo_wt &  DE_ko_lo))
+
+levels(vennFactors) <- c("none", "DE_ko_lo", "DE_lo_wt", "DE_lo_wt and DE_ko_lo", "DE_ko_wt", "DE_ko_wt and DE_ko_lo", "DE_ko_wt and DE_lo_wt", "all")
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+summary(vennFactors)
+```
+The majority of genes are not differentially expressed across any comparison, which is expected (RpoS does not regulate all genes in the E. coli genome). Of the genes that are differentially expressed across at least one comparison, the largest group is the genes which are differentially expressed across knockout and wild type which makes sense if, as we expect, regulation is more or less monotonic. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+#which are the particular genes which are DE across all threee pairwise comparisons?
+sigGenesAcrossAll <- allFDRAdjP %>%
+  mutate(geneid = rownames(countsTable.4Cond)) %>%
+  select(DEacrossAll, geneid) %>%
+  filter(DEacrossAll == TRUE)
+
+#which are the particular genes that are DE across any of the three pairwise comparisons?
+sigGenesAcrossAny <- allFDRAdjP %>%
+  mutate(geneid = rownames(countsTable.4Cond)) %>%
+  select(DEacrossAny, geneid) %>%
+  filter(DEacrossAny == TRUE)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+sigGenesAcrossAll %>%
+  summarise(numGenesDEAcrossAll = n(),
+            propGenesDEAcrossAll = n()/4497)
+
+sigGenesAcrossAny %>%
+  summarise(num.genes.DE.across.any = n(),
+            prop.genes.DE.across.any = n()/4497)
+
+```
+
+We find that about 31.3% of genes (1408 genes) were differentially expressed across at least one of the three pairwise comparisons of RpoS levels.
+
+After exploring, we now wish to know which genes are regulated by RpoS and the direction of their regulation. The logic in carrying out this procedure relies on the assumption that regulation is more or less monotonic. We will consider the genes which showed differential expression between knockout and wildtype to be regulated by RpoS (known as the "RpoS-regulon"" or heretofore "regulon").
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# create a dataframe with the log2FoldChange from the KO vs WT differential expression analysis and an indicator of which genes were found to be differentially expressed between those conditions.
+upNdown.0.100 <- data.frame(results.0.100$log2FoldChange, allFDRAdjP$isDE.KO.WT)
+rownames(upNdown.0.100) = rownames(countsTable.4Cond)
+colnames(upNdown.0.100) = c("log2FoldChange", "isDE.KO.WT")
+
+# now produce a summary of how many DE genes were upreguated and how many were downregulated
+upNdown.0.100 %>%
+  mutate(geneid = rownames(countsTable.4Cond)) %>%
+  select(isDE.KO.WT, geneid, log2FoldChange) %>%
+  filter(isDE.KO.WT) %>%
+  summarise(upregulated = sum(log2FoldChange > 0),
+            downreguated = sum(log2FoldChange < 0))
+```
+
+Of the 1350 genes found to be differentially expressed across the knockout and wildtype conditions, we find that 748 genes are upregulated, while 602 genes are downregulated as the RpoS level changes from 0% (knockout) to 100% (wild-type). 
+
+Creating data frames with the gene names included, and comparing to Garrett's results (which genes were DE across the different pairwise comparisons). 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+###########################################################################
+# Which GENE NAMES are Differentially Expressed KnockOut versus WildType? #
+###########################################################################
+
+# load data table which helps us map the geneid to the gene name
+nameTable <- read.delim("~/Desktop/github/rpoS-regulon/nameMapping.txt")
+
+# make a data frame with the columns isDE.KO.WT (TRUE/FALSE if the KnockOut-WildType comparison was significant) and the geneid. 
+# filter to keep only the rows which are not NA and which are DE between KO and WT
+de.ko.wt <- allFDRAdjP %>%
+  select("FDR-adj-pval.KO.WT" = pvalFDR.Knockout.WildType, isDE.KO.WT, geneid) %>%
+  filter(isDE.KO.WT != "NA", isDE.KO.WT)
+
+#join the de.ko.wt and nameTable tables! 
+de.ko.wt <- left_join(de.ko.wt, nameTable, by="geneid")
+
+# AHHH -- NA's
+anti_join(left_join(de.ko.wt, nameTable), inner_join(de.ko.wt, nameTable))
+# There are genes in our data simply not listed in the nameTable.
+```
+
+Comparison with prior findings
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+#Let's compare to garrett's results from before:
+GarrettKOWT <- read.delim("~/Desktop/github/rpoS-regulon/wt vs ko sig genes.txt")
+
+#let's just compare gene id to gene id
+Garret_sig.ko.wt_ID <- GarrettKOWT %>%
+                      select(geneid)
+de.ko.wt_ID <- de.ko.wt %>%
+                  select(geneid)
+```
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# for how many genes do we match up?
+length(inner_join(Garret_sig.ko.wt_ID, de.ko.wt_ID)$geneid)
+garrett.0.100 <- anti_join(Garret_sig.ko.wt_ID, de.ko.wt_ID)
+```
+I found all all but three of the 1044 genes Garrett had found in the regulon. 
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#here are the ID's of the genes which I found significant that garrett did not
+me.0.100 <- anti_join(de.ko.wt_ID, Garret_sig.ko.wt_ID, by = "geneid")
+length(me.0.100$geneid)
+```
+
+There is one gene, gene670, which seems to not have a name match in nameTable. There are also 46 genes in the allCounts_new which are not accounted for in the nameMapping. This is something we could investigate further in the NC_000913.gff. 
+
+Garrett found 3 genes DE that I did not find, and I found 309 genes DE that he did not find. However, 1041 out of the 1350 genes (77.1%) which I found to be DE, Garrett also found. This could be due to the new technology of DESeq2 and the fact that I am not Bonferroni adjusting where he did. Below are the p-values for the three genes Garrett found DE that I did not. They are not low, but they are not extremely high either. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+allFDRAdjP %>%
+  filter(geneid %in% garrett.0.100$geneid) %>%
+  select(pvalFDR.Knockout.WildType, geneid) %>%
+  mutate(pvalFDR.Knockout.WildType = pvalFDR.Knockout.WildType)
+                
+```
+
+
+Low versus WildType
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+#############################################################################
+# Which Genes were Differentially Expressed - Low (26%) vs WildType (100%)? #
+#############################################################################
+
+de.lo.wt <- allFDRAdjP %>%
+  select(pvalFDR.Low.WildType, isDE.LO.WT, geneid) %>%
+  filter(isDE.LO.WT != "NA", isDE.LO.WT)
+
+de.lo.wt <- left_join(de.lo.wt, nameTable)
+
+anti_join(left_join(de.lo.wt, nameTable), inner_join(de.lo.wt, nameTable))
+
+```
+Again, gene670 is missing from the nameTable. 
+
+Now, we repeat the comparison to Garrett's findings with the 0% vs 26% comparison.
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Compare with Garrett's results #
+# ============================== #
+GarretLOWT <- read.delim("~/Desktop/github/rpoS-regulon/wt vs low sig genes.txt")
+
+# just see gene id
+Garrett_sig.low.wt_ID <- GarretLOWT %>%
+                        select(geneid)
+length(Garrett_sig.low.wt_ID$geneid)
+
+de.lo.wt_ID <- de.lo.wt %>%
+                select(geneid)
+length(de.lo.wt_ID$geneid)
+
+# for how many genes do we match up?
+length(inner_join(de.lo.wt_ID, Garrett_sig.low.wt_ID)$geneid)
+
+# genes Garrett found significant which I did not
+garrett.26.100 <- anti_join(Garrett_sig.low.wt_ID, de.lo.wt_ID)
+length(garrett.26.100$geneid) #how many? There are none.
+
+# genes I found significant which Garrett did not
+me.26.100 <- anti_join(de.lo.wt_ID, Garrett_sig.low.wt_ID)
+length(me.26.100$geneid) #how many
+
+# what p-values did I find for the genes Garret found sig but I did not?
+allFDRAdjP %>%
+  filter(geneid %in% garrett.26.100$geneid) %>%
+  select(pvalFDR.Low.WildType, geneid) %>%
+  mutate(pvalFDR.Low.WildType = pvalFDR.Low.WildType)
+```
+There are no genes which Garrett found significant 0% vs 26% that I did not (all 368 of his genes match mine). I found an additional 362 significant, however. 
+
+Finally, we compare my and Garrett's results for the 0% vs. 26% comparison.
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+##########################################################################
+# Which Genes Were Differentially Expressed - Knockout(0%) and Low (26%) #
+##########################################################################
+de.ko.lo <- allFDRAdjP %>%
+              filter(isDE.KO.LO != "NA", isDE.KO.LO) %>%
+              select(pvalFDR.Knockout.Low, geneid)
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+length(de.ko.lo$geneid)#how many genes are DE 0% vs 26%
+
+length(left_join(de.ko.lo,nameTable, by = "geneid")$geneid)# length the same, shows all geneids were successfully matched to genenames found in the nameTable
+
+de.ko.lo <- left_join(de.ko.lo,nameTable, by = "geneid")
+length(de.ko.lo$genename) 
+```
+
+We (DESeq2) find 355 genes are differentially expressed between the Knockout and Low conditions. At this time, I do not have data on what Garrett found to be differentially expressed previously with DESeq. All of the genes found to be significant across these two categories are successfully found in the nameTable. 
+
+
+###GENE EXPRESSION SHAPES & SENSITIVITY
+The goal of this section is to identify whether each differentially expressed gene is "sensitive," "insensitive," or "neither."
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# set up a 3-condition comparison with DESeq2 to get normalized counts three-ways
+countsTable.3Cond <- select(countsTable.4Cond, ko1, ko2, lo1, lo2, wt1, wt2)
+condition.3Cond <- as.factor(c("ko", "ko", "lo", "lo", "wt", "wt"))
+coldata.3Cond <- data.frame(row.names = colnames(countsTable.3Cond), condition.3Cond)
+cds.3Cond <- DESeqDataSetFromMatrix(countData=countsTable.3Cond, colData = coldata.3Cond, design = ~ condition.3Cond)
+
+# get the size factors for cds.3Cond - that's what we really care about so we're able to compare apples to apples
+cds.3Cond <- estimateSizeFactors(cds.3Cond)
+
+# make a copy of the Counts Data Set for 0 vs 100...
+cdsSens.0.100 <- cds.0.100
+# but put the ko1,2 and wt1,2 size factors for cds.3Cond for the cdsSens.0.100 size factors
+sizeFactors(cdsSens.0.100) <- sizeFactors(cds.3Cond)[c(1:2, 5:6)]
+cdsSens.0.100 <- estimateDispersions(cdsSens.0.100,  fitType = "parametric") # re-estimate Dispersions based on these new size factors
+
+# COUNTS
+# NOTE: we use cdsSens.0.100 normalized counts to build the negative binomial probability model because we are interested in comparing observed expression to the line going strictly between the 0% and 100% levels. 
+countsKO <- as.data.frame(counts(cdsSens.0.100)) %>%
+              select(ko1, ko2)
+countsLO <- as.data.frame(counts(cds.3Cond)) %>%
+              select(lo1, lo2)
+countsWT <- as.data.frame(counts(cdsSens.0.100)) %>%
+              select(wt1, wt2)
+
+# SIZE FACTORS
+sizeFactorsKO <- sizeFactors(cdsSens.0.100)[1:2]
+sizeFactorsLO <- sizeFactors(cds.3Cond)[3:4]
+sizeFactorsWT <- sizeFactors(cdsSens.0.100)[3:4]
+
+# or could we just have done counts(cdsSens.0.100, normalized = TRUE)? I think we could have
+
+#DISPERSIONS
+dispsKO <- dispersions(cdsSens.0.100)
+dispsWT <- dispersions(cdsSens.0.100)
+```
+
+In the previous analysis, we investigated if there any intermediate optima (where genes are maximally or minimally expressed at the Low RpoS concentration?); Dr. Hardin and I decided to leave this part out for the moment because even if there are such genes (though recall, Garrett only found two such genes), we can still categorize them as sensitive, insensitive, or neither. 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+#get the normalized counts for each pairwise comparison
+normCounts.0.100 <- DESeq2::counts(cds.0.100, normalized=TRUE)
+normCounts.26.100 <- DESeq2::counts(cds.26.100, normalized=TRUE)
+normCounts.0.26 <- DESeq2::counts(cds.0.26, normalized = TRUE)
+
+# make a dataframe of the normalized pairwise counts for all three comparisons
+pairwiseCountsRaw <- cbind(normCounts.0.100[, 1:2], normCounts.26.100[, 1:2], normCounts.0.26[, 1:2])
+# make it a data frame
+pairwiseCounts <- as.data.frame(pairwiseCountsRaw)
+# set column names of pairwiseCounts
+colnames(pairwiseCounts) <- c("ko.0.100", "wt.0.100", "lo.26.100", "wt.26.100", "ko.0.26", "lo.0.26")
+rownames <- rownames(pairwiseCounts)
+pairwiseCounts <- pairwiseCounts %>%
+                    mutate(geneid = rownames)
+
+# join the pairwise counts to the table with the loSigGenes  
+# also filter to just look at the genes which are diff expressed ko-vs-wt and ko-vs-low
+loSigGenes <- full_join(allFDRAdjP, pairwiseCounts, by="geneid") %>%
+                filter(isDE.KO.WT, isDE.KO.LO)
+
+loSigGenes <- loSigGenes %>%
+  mutate(lowIsMin = 
+           ifelse(lo.26.100 < wt.26.100 & lo.0.26 < ko.0.26, TRUE, FALSE),            lowIsMax = 
+           ifelse(lo.26.100 > wt.26.100 & lo.0.26 > ko.0.26, TRUE, FALSE))
+
+# internal minimum
+loSigGenes %>%
+  filter(lowIsMin) %>%
+  summarize(numLowIsMin = n())
+
+# internal maximum
+loSigGenes %>%
+  filter(lowIsMax) %>%
+  summarize(numLowIsMax = n())
+```
+
+
+##Sensitivity: building the model
+
+Null hypothesis: Expression is linear with increasing levels of RpoS. 
+
+Our expected mean count ("mu") for the "low" level of RpoS is interpolated from a line drawn between the means of the Knockout and Wildtype conditions after normalizing by the size factor (note: this is why, in the test itself, we multiply "mu" by the size factor for the intermediate condition generated above).
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# mean count for Knockout condition for each gene
+meansKO <- rowMeans(t(t(countsKO)/sizeFactorsKO))
+
+# mean count for WildType condition for each gene
+meansWT <- rowMeans(t(t(countsWT)/sizeFactorsWT))
+
+# generate expected mean counts for each gene, store in vector "mus"
+mus <- .26*(meansWT - meansKO) + meansKO
+
+# generate expected dispersion for each gene, store in dispsLO
+# to see an explanation for why this works, look at 6june_withConvincing.R
+dispsLO <- .26*(dispsWT - dispsKO) + dispsKO 
+
+# estimate of size parameter for LO
+sizeLO <- 1/dispsLO * (sum(sizeFactorsLO)^2)/sum(sizeFactorsLO^2)
+```
+
+##Sensitivity Testing
+
+We now test whether the actual observed counts for each gene significantly indicate that the gene has a relationship with RpoS which may be described as sensitive, insensitive, or neither. We implement the negative binomial probability density function for the hypothesis tests.
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# total observed counts from Low condition
+totalObservedLO <- rowSums(countsLO)
+# summing is the same as averages, mathematically, so we do this to simplify the math and increase precision. If we wanted to stay in means-land, we could just do this with rowSums(countsLO)/2 and use mu = mus*sum(sizeFactorsLO)/2.
+
+testvals <- pnbinom(totalObservedLO, size = sizeLO, mu = mus*sum(sizeFactorsLO))
+# note: size = dispersion parameter
+#       mu is for the alternative parametrization of the Negative Binomial           model.
+#       prob = size/(size + mu)
+#       pnbinom gives the pdf of the negative binomial function
+
+# pmin, "parallel minimum," takes the two vectors testvals and 1-testvals to give a single vector whose ith element is the minimum of the ith element of testvals and the ith element of 1-testvals.
+# We're doing this to get the sensitivity p-values at each gene - this is the probability that the gene's count at Low RpoS (26%) is what is what we observed given that in reality the count falls on a line between 0% and 100% (H0 = linear relationship).  
+pvals.unadj <- pmin(testvals, 1-testvals)*2
+# We multiply by two because we're accounting for two-tails in this two-tailed hypothesis test.
+
+# we fdr-adjust the p-values and create two new variables to help sort the genes. Observed.is.Less.Than.Expected is tapping into the sensitivity question, while meanWT.is.Greater.Than.meanKO is tapping into the up/down regulation question. We will use these two booleans beginning in the next chunk to classify genes into one of the six categories.
+pvals.adj <- data.frame(adjusted.pval = p.adjust(pvals.unadj*2, method = "fdr"), Observed.is.Less.Than.Expected = testvals < 1-testvals, meanWT.is.Greater.Than.meanKO = meansWT > meansKO)
+
+# save all important information into a dataFrame
+sensitivity <- data.frame(countsKO$ko1,
+                          countsKO$ko2,
+                          countsLO$lo1,
+                          countsLO$lo2,
+                          countsWT$wt1,
+                          countsWT$wt2,
+                          meansKO, 
+                          meansLO = totalObservedLO/2, # now we divide by two to get back into means-land
+                          meansWT, 
+                          totalExpectedLO = mus*sum(sizeFactorsLO), 
+                          totalObservedLO, 
+                          adjusted.pval = pvals.adj$adjusted.pval,
+                          Observed.is.Less.Than.Expected = pvals.adj$Observed.is.Less.Than.Expected,
+                         positiveSlope = pvals.adj$meanWT.is.Greater.Than.meanKO, geneid = rownames(countsTable.4Cond))
+```
+
+##Contingency Tables for Sensitivity and Positive/Negative Regulation by RpoS
+
+We will divide the genes into the following six groups:
+1) insensitive, positively regulated (isInsensPos)
+2) insensitive, negatively regulated (isInsensNeg)
+3) Neither, positively regulated (isNeitherPos)
+4) Neither, negatively regulated (isNeitherNeg)
+5) sensitive, positively regulated (isSensPos)
+6) sensitive, negatively regulated (isSensNeg)
+
+## Groups 1 and 2 : Insensitive
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+isInsensPos <- sensitivity %>%
+              filter(adjusted.pval < 0.05, # keep only the isInsensPos genes which are differentially expressed across Knockout and Wildtype conditions
+                     Observed.is.Less.Than.Expected, #insensitive positive would have observed at 0.26 less than expected and positive slope
+                     positiveSlope)
+
+isInsensPos <- inner_join(isInsensPos, de.ko.wt, by = "geneid")
+
+isInsensNeg <- sensitivity %>%
+                filter(adjusted.pval < 0.05, # keep only the isInsensNeg genes which are differentially expressed across Knockout and Wildtype conditions
+                       Observed.is.Less.Than.Expected == FALSE,#insensitive negative would have observed at 0.26 greater than expected and negatives slope
+                       positiveSlope == FALSE)
+
+isInsensNeg <- inner_join(isInsensNeg, de.ko.wt, by = "geneid")
+
+isInsens <- full_join(isInsensNeg, isInsensPos)
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+
+isInsens %>%
+  group_by(positiveSlope) %>%
+  summarize(numGenes = n(),
+            percent = n()/34)
+```
+
+My results suggest that 29 genes (85.3%) are insensitive and upregulated by RpoS while the other 5 (14.7%) are downregulated, totalling 34. 
+
+For comparison, Garrett identified 32 insensitive genes. I do not access to any more specific data at this time.
+
+## Groups 3 and 4 : Neither
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+isNeitherPos <- sensitivity %>%
+              filter(adjusted.pval > 0.05, # the genes non-significantly different from the line betwen 0% and 100%
+                     positiveSlope)
+
+isNeitherPos <- inner_join(isNeitherPos, de.ko.wt, by = "geneid")
+
+isNeitherNeg <- sensitivity %>%
+                filter(adjusted.pval > 0.05,
+                       positiveSlope == FALSE)
+# keep only the isInsensNeg genes which are differentially expressed across Knockout and Wildtype conditions
+isNeitherNeg <- inner_join(isNeitherNeg, de.ko.wt, by = "geneid")
+
+isNeither <- full_join(isNeitherNeg, isNeitherPos)
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+isNeither %>%
+  group_by(positiveSlope) %>%
+  summarize(numGenes = n(),
+            percent = n()/1195)
+```
+```{r}
+anti_join(old.linear.pos, isNeitherPos) %>% select(geneID, geneName, bNum) # which genes did Garrett find linear which I did not find?
+length(old.linear.pos$geneID)+length(old.linear.neg$geneID)
+```
+
+My results suggest suggest that out of the 1195 genes which can neither be categorized as sensitive nor insensitive, 606 genes (50.7%) are upregulated by RpoS while 589 (49.3%) are downregulated by RpoS.
+
+For comparison, Garrett identified 910 "neither" genes, 53% of which were postively regulated and 47% of which were negatively regulated; our results are very close. He found 
+
+## Groups 5 and 6 : Sensitive
+
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+isSensPos <- sensitivity %>% 
+              filter(adjusted.pval < 0.05, 
+              Observed.is.Less.Than.Expected == FALSE,
+              positiveSlope) 
+# keep only the isSensPos genes which are differentially expressed across Knockout and Wildtype conditions
+isSensPos <- inner_join(isSensPos, de.ko.wt, by= "geneid")
+
+isSensNeg <- sensitivity %>% 
+              filter(adjusted.pval < 0.05, 
+              Observed.is.Less.Than.Expected,
+              positiveSlope == FALSE) 
+
+isSensNeg <- inner_join(isSensNeg, de.ko.wt, by = "geneid")
+
+# combine to show all sensitive genes
+isSens <- full_join(isSensNeg, isSensPos)
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+isSens %>%
+  group_by(positiveSlope) %>%
+  summarize(numGenes = n(),
+            percent = n()/121)
+
+```
+
+My results suggest that 113 genes (93.3%) are sensitive and upregulated by RpoS while 8 (6.6%) are downregulated, totalling 121. 
+
+Compare to Garrett's results: Sensitive Genes. 
+```{r, echo=FALSE, message = FALSE, warning = FALSE}
+sensitiveGenesGarrett <- read.delim("~/Desktop/github/rpoS-regulon/sensitiveGenes.txt")
+
+commonSens <- inner_join(isSens, sensitiveGenesGarrett, by=c("geneid", "genename", "bnum"))
+
+sensitiveGenesGarrett <- left_join(sensitiveGenesGarrett,
+                                    sensitivity, by = "geneid")
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+commonSens %>%
+  group_by(positiveSlope) %>%
+  summarise(numGenes = n(), percent = n()/96 * 100)
+```
+For the genes we each deemed "sensitive," 96/121 (79.3%) of the genes I found match up with Garrett's (96/102 = 94.1% of the genes Garrett found match up with mine). More specifically, Garrett found 93 of the 113 (78.8%) sensitive genes which I found to be upregulated and 3/8 (37.5%) which I found to be downregulated. 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+sensitiveGenesGarrett %>%
+  group_by(positiveSlope) %>%
+  summarise(numGenes = n(),
+            percent = n()/102 * 100)
+
+```
+For comparison, we note that Garrett found 98/102 (96.1%) sensitive genes upregulated and 4/102 (3.9%) sensitive genes downregulated. Recall that my results suggest that 113 genes (93.3%) are sensitive and upregulated by RpoS while 8 (6.6%) are downregulated.
+
+GROUP GENES BY POSITIVE/NEGATIVE REGULATION
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+posGenes <- sensitivity %>%
+              filter(positiveSlope) %>%
+              arrange(Observed.is.Less.Than.Expected)
+
+posGenes <- inner_join(posGenes, de.ko.wt)
+
+negGenes <- sensitivity %>%
+              filter(positiveSlope == FALSE) %>%
+              arrange(Observed.is.Less.Than.Expected)
+
+negGenes <- inner_join(negGenes, de.ko.wt)
+
+# genes which we believe to be differentially expressed between KO and WT conditions, therefore we believe are regulated by RpoS
+regulatedGenes <- full_join(negGenes, posGenes)
+
+regulatedGenes <- regulatedGenes %>%
+                    mutate(DirectionalSensitivity = 
+                      ifelse(geneid %in% isInsensPos$geneid, "isInsensPos",
+                      ifelse(geneid %in% isInsensNeg$geneid, "isInsensNeg",
+                      ifelse(geneid %in% isNeitherPos$geneid, "isNeitherPos",
+                      ifelse(geneid %in% isNeitherNeg$geneid, "isNeitherNeg",
+                      ifelse(geneid %in% isSensPos$geneid, "isSensPos",
+                      "isSensNeg"))))),
+                      
+                      Sensitivity = 
+                        ifelse(geneid %in% isInsensPos$geneid | geneid %in%  isInsensNeg$geneid, "Insensitive",
+                        ifelse(geneid %in% isNeitherPos$geneid | geneid %in%  isNeitherNeg$geneid, "Neither",
+                        "Sensitive")))  
+
+# check that we grouped this correctly and get the same numbers as before
+regulatedGenes %>%
+  group_by(Sensitivity) %>%
+  summarize(n())
+  
+```
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+regulatedGenes %>%
+  group_by(positiveSlope) %>%
+  summarise(numGenes = n(),
+            percent = n()/1350)
+
+write.table(regulatedGenes, "oldRegulatedGenes.txt", sep="\t")
+```
+
+We find that among the 1350 genes regulated by RpoS (the genes we found to be differentially expressed between the Knockout and Wildtype conditions), 748 (55.4%) are upregulated and 602 (44.6% are downregulated).
+
+Comparing this to Garrett's findings, of the 1044 genes regulated by RpoS that he found, 605 (58%) were upregulated and 439 (42%) were downregulated. 
+
+## A Difference in Upregulated and Downregulated Genes in Each of the Sensitive, Neither, and Insensitive Groups
+And yet, the vast majority of both sensitive and insensitive genes are positively regulated by RpoS. Is this tendency for positive regulation greater than what we would expect by chance? 
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+chisq.test(table(regulatedGenes$positiveSlope, regulatedGenes$Sensitivity), simulate.p.value = T)
+```
+Yes! There is a significant difference in positively regulated genes between the three groups (P < 0.0005). This is consistent with previous findings (significant at P < 0.001). 
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+regulatedGenes <- inner_join(allFDRAdjP, regulatedGenes)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+regulatedGenes %>%
+  group_by(DirectionalSensitivity) %>%
+  summarise(numGenes = n())
+
+write.table(regulatedGenes, "NonBonferroniRegulatedGenesOld.txt", sep = "\t")
+```
+Of the RpoS-regulated genes (DE between Knockout and Wildtype conditions), the above table breaks down how many of these were differentially expressed between the Knockout and Low conditions and how their directional sensitivity may be categorized. 
+
+#Plots
+
+##Plotting one Sensitive Gene, 3-way normalized count against RpoS level 
+First get the data we use DESeq to normalize across all conditions. 
+```{r}
+cds.3Cond <- DESeq(cds.3Cond)
+results.3Cond <- results(cds.3Cond, alpha = 0.05)
+# note: the only p-values results.3Cond condtains are the contrasts between KO and WT. I think DESeq2's results() defaults to the first and last conditions you give it. 
+# however, one could break up the results into different pairwise comparisons.
+# break cds.3Cond into the 3 pairwise comparisons to get the p-values for differential expression for each comparison
+# I decided not to do this up top for the three pairwise comparisions because I didn't want the normalization to take the third condition (whichever condition wasn't being compared) into account 
+res.KO.WT <- results(cds.3Cond, contrast = c("condition.3Cond", "ko", "wt"), alpha = 0.05)
+mcols(res.KO.WT)$description
+res.LO.WT <- results(cds.3Cond, contrast = c("condition.3Cond", "lo", "wt"), alpha = 0.05)
+mcols(res.LO.WT)$description
+res.KO.LO <- results(cds.3Cond, contrast = c("condition.3Cond", "ko", "lo"), alpha = 0.05)
+mcols(res.KO.LO)$description
+summary(res.KO.LO) 
+
+# TRANSFORM THE COUNTS DATA
+# Explore some transformations, and read up on transformations in the DESeq2 Vignette
+# see below for log2 pseudo count
+# rlog
+rlog.cds.3Cond <- rlog(cds.3Cond, blind = FALSE)
+# variance stabilising transformation
+vst.cds.3Cond <- varianceStabilizingTransformation(cds.3Cond, blind=FALSE)
+
+# Compare rank(mean) to standard deviation at different counts
+notAllZero <- (rowSums(counts(cds.3Cond))>0)
+# pseudocount transformation
+meanSdPlot(log2(counts(cds.3Cond,normalized=TRUE)[notAllZero,] + 1))
+# variance stabilising transformation
+meanSdPlot(assay(vst.cds.3Cond[notAllZero,]))
+# now, you could try the results with either of these transformations and see if we get different plots!
+
+# by how much do our size factors vary?
+max(sizeFactors(cds.3Cond)) - min(sizeFactors(cds.3Cond))
+sd(sizeFactors(cds.3Cond))
+# not by much :) 
+```
+
+Make the table of normalized counts
+```{r}
+rowNames <- rownames(countsTable.4Cond)
+# get three-way normalized counts comparison
+normCounts.3Cond <- as.data.frame(counts(cds.3Cond, normalized = TRUE)) %>%
+                      mutate(geneid = rowNames)
+
+regulatedGenes.normCount <- left_join(regulatedGenes, normCounts.3Cond, by = "geneid") %>%
+                    mutate(normCountKO1 = ko1, normCountKO2 = ko2, 
+                           normCountLO1 = lo1, normCountLO2 = lo2,
+                           normCountWT1 = wt1, normCountWT2 = wt2)
+```
+regulated.normCount.tidy
+```{r}
+# data frame of regulated genes with the variables
+# genename, Sensitivity (sensitive, insensitive, or neither), DirectionalSensitivity (specifies positive or negative), sensitivity p-value, RpoSlevel, sample, and normCount (normalized count), expressionProportion
+regulated.normCount.tidy <- regulatedGenes.normCount %>% 
+                select(genename, normCountKO1, normCountKO2,
+                       normCountLO1, normCountLO2, normCountWT1,
+                       normCountWT2, Sensitivity, DirectionalSensitivity)  %>%
+                # key: , value: normCount
+                gather(level, normCount, -genename, -Sensitivity, -DirectionalSensitivity) %>%
+                separate(level, c("level", "sample"), 11) %>%
+                arrange(genename) %>%
+                mutate(level = replace(level, level == "normCountKO",
+                                               "KO"),
+                       level = replace(level, level == "normCountLO",
+                                               "LO"),
+                       level = replace(level, level == "normCountWT",
+                                               "WT")) %>% 
+                mutate(nlevel = ifelse(level == "KO", 0,
+                                       ifelse(level == "LO", 0.26, 1)),
+                       nlevel = as.numeric(nlevel)) %>%
+                mutate(logNormCount = log(normCount)) %>%
+                group_by(genename, level) %>%
+                    mutate(levelMean = mean(normCount),
+                           levelMeanLog = mean(logNormCount)) %>%
+                ungroup() %>%
+                group_by(genename) %>%
+mutate(scaler = ifelse(DirectionalSensitivity %in% c("isNeitherPos", "isSensPos", "isInsensPos") , levelMean[5], levelMean[1]), # what we're scaling the y-axis by (mean(ko1,ko2) if neg; mean(wt1, wt2) if pos)
+      logScaler = ifelse(DirectionalSensitivity %in% c("isNeitherPos", "isSensPos", "isInsensPos") , levelMeanLog[5], levelMeanLog[1]),
+      meanScaled = levelMean/scaler,
+      normCountScaled = normCount/scaler,
+      maxNormCount = max(normCount), # maximum normalized count
+      levelPropOverMaxCount = levelMean/maxNormCount, # scale level Mean by maximum normalized count for each gene
+      expressionProportionOverMaxCount = normCount/maxNormCount,
+    ### LOGGED NORMCOUNTS ###
+      meanScaledLog = levelMeanLog/logScaler,
+      logNormCountScaled = logNormCount/logScaler,
+      maxLevelMeanLog = max(levelMeanLog), # maximum among means of logged data across each level for each gene
+      levelPropOverMaxMeanLog = levelMeanLog/maxLevelMeanLog, # scale levelMeanLog by maximum levelMeanLog for each gene
+      expressionProportionOverMaxMeanLog = logNormCount/maxLevelMeanLog, # scale logNormCounts by maximum levelMeanLog for each gene
+      maxLogNormCount = max(logNormCount), # maximum logged normalized count
+      levelPropOverMaxCountLog = levelMeanLog/maxLogNormCount, # scale level Mean by maximum normalized logged count for each gene
+      expressionProportionOverMaxCountLog = logNormCount/maxLogNormCount) %>% # scale logged normCounts by maximum logged normaized count for each gene
+      ungroup()
+```
+data frames to use going off of regulated.tidy
+```{r}
+# the subset of regulated.tidy containing sensitive genes
+regulated.sens.tidy <- regulated.normCount.tidy %>%
+                          filter(Sensitivity == "Sensitive")
+regulated.sens.pos.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isSensPos")
+regulated.sens.neg.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isSensNeg")
+
+# the subset of regulated.tidy containing insensitive genes
+regulated.insens.tidy <- regulated.normCount.tidy %>%
+                          filter(Sensitivity == "Insensitive")
+regulated.insens.pos.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isInsensPos")
+regulated.insens.neg.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isInsensNeg")
+
+# the subset of regulated.tidy containing "neither" genes
+regulated.neither.tidy <- regulated.normCount.tidy %>%
+                          filter(Sensitivity == "Neither")
+regulated.neither.pos.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isNeitherPos")
+regulated.neither.neg.tidy <- regulated.normCount.tidy %>%
+                            filter(DirectionalSensitivity == "isNeitherNeg")
+
+# the subset of regulated.tidy where the level is KO or WT
+regulated.normCount.KO_WT.tidy <- regulated.normCount.tidy %>%
+                          filter(level %in% c("KO", "WT"))
+###
+regulated.sens.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                              filter(Sensitivity == "Sensitive")
+regulated.sens.pos.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                               filter(DirectionalSensitivity == "isSensPos")
+regulated.sens.neg.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                              filter(DirectionalSensitivity == "isSensNeg")
+###
+regulated.insens.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                                filter(Sensitivity == "Insensitive")
+regulated.insens.pos.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                              filter(DirectionalSensitivity == "isInsensPos")
+regulated.insens.neg.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                              filter(DirectionalSensitivity == "isInsensNeg")
+###
+regulated.neither.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                                  filter(Sensitivity == "Neither")
+regulated.neither.pos.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                            filter(DirectionalSensitivity == "isNeitherPos")
+regulated.neither.neg.KO_WT.tidy <- regulated.normCount.KO_WT.tidy %>%
+                            filter(DirectionalSensitivity == "isNeitherNeg")
+```
+
+Plotting: unLogged
+One gene by normCount
+```{r}
+# we try a loess fit to show shape. However, we later decide that loess and splines are not the best shape to use because they shows up and down movement that is probably not there (only 6 data points to make the curve!)
+ggplot(data = head(regulated.normCount.tidy), aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_smooth(se = FALSE, alpha = 0.5) + ggtitle("One Gene, Neither Sensitive nor Insensitive")
+```
+4 sensitive genes : LOESS
+```{r}
+ggplot(data = regulated.sens.tidy[1:24,], aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_smooth(se = FALSE, alpha = 0.5) + ggtitle("Sensitive")
+```
+4 sensitive genes : spline
+```{r}
+# the dotted lines show what we would expect gene expression to look like if the shape was linear
+ggplot(data = regulated.sens.tidy[1:24,], aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_smooth(se = FALSE, alpha = 0.5, method = "lm", formula = y~splines::bs(x, 1)) + geom_smooth(data = regulated.sens.KO_WT.tidy[1:16,], method = "lm", alpha = 0.5, linetype = "dotted", se = FALSE) + ggtitle("Sensitive")
+```
+
+3 insensitive genes
+```{r}
+ggplot(data = regulated.insens.tidy[1:18,], aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_smooth(se = FALSE, alpha = 0.5) + geom_smooth(data = regulated.insens.KO_WT.tidy[1:12,], method = "lm", alpha = 0.5, linetype = "dotted", se = FALSE) + ggtitle("Insensitive")
+```
+3 neither genes
+```{r}
+ggplot(data = regulated.neither.tidy[1:18,], aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_smooth(se = FALSE, alpha = 0.5) + geom_smooth(data = regulated.neither.KO_WT.tidy[1:12,], method = "lm", alpha = 0.5, linetype = "dotted", se = FALSE) + ggtitle("Neither Sensitive nor Insensitive")
+```
+
+1. All Sensitive Positive Genes
+```{r}
+ggplot(data = regulated.sens.pos.tidy, aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) +  geom_line(data = regulated.sens.pos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = regulated.sens.pos.KO_WT.tidy, method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("All Sensitive Positive Genes") + coord_cartesian(ylim = c(0,2.5)) 
+```
+#Profile-gene correlation 
+Scaled normCounts
+```{r}
+# Design profiles!
+profile.linear.pos <- c(0, 0, .26, .26, 1, 1)
+profile.linear.neg <- c(1, 1, 0.74, 0.74, 0.00, 0.00)
+profile.sens.pos <- c(0, 0, 0.9, 0.9, 1, 1)
+profile.sens.neg <- c(1, 1, 0.1, 0.1, 0, 0)
+profile.insens.pos <- c(0, 0, 0.1, 0.1, 1, 1)
+profile.insens.neg <- c(1, 1, 0.9, 0.9, 0, 0)
+
+profile.6 <- data.frame(sens.pos = profile.sens.pos, sens.neg = profile.sens.neg, insens.pos = profile.insens.pos, insens.neg = profile.insens.neg, linear.pos = profile.linear.pos, linear.neg = profile.linear.neg)
+
+scaledNormCountsByGene.6 <- regulated.normCount.tidy %>%
+  select(genename, level, sample, normCount) %>%
+  unite(level.sample, level, sample) %>%
+  filter(genename != "NA") %>%
+  spread(genename, normCount) %>%
+  select(-1)
+
+# using normCounts (3 levels, 2 at each level)
+profile.scaledNormCountsByGene.6 <- as.data.frame(t(cor(profile.6, scaledNormCountsByGene.6))) 
+rownames <- row.names(profile.scaledNormCountsByGene.6)
+rowMax <- rowMax(as.matrix(profile.scaledNormCountsByGene.6))
+profile.scaledNormCountsByGene.6 <- profile.scaledNormCountsByGene.6 %>%
+  mutate(genename = rownames, 
+         maxCorr = rowMax, # find in which classification maximum correlation lives
+         group = ifelse(maxCorr == linear.pos, "linear.pos", 
+                        ifelse(maxCorr == linear.neg, "linear.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+  
+
+regulated.normCount.tidy <- left_join(regulated.normCount.tidy, profile.scaledNormCountsByGene.6) 
+
+# add the profiles so that we can plot these alongside the normCounts
+regulated.normCount.tidy <- regulated.normCount.tidy %>% group_by(genename) %>%
+     mutate(profile.shape = ifelse(group == "linear.pos",  profile.linear.pos,
+                            ifelse(group == "linear.neg", profile.linear.neg,
+                            ifelse(group == "insens.pos", profile.insens.pos,
+                            ifelse(group == "insens.neg", profile.insens.neg,
+                            ifelse(group == "sens.pos", profile.sens.pos, 
+                                      profile.sens.neg)))))) %>%
+  ungroup()
+
+ggplot(data = filter(regulated.normCount.tidy, group != "NA"), aes(x = nlevel*100, y = normCountScaled)) + geom_point(aes(col = genename)) + geom_line(data = filter(regulated.normCount.tidy, group != "NA"), aes(y = meanScaled, col = genename), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, group != "NA"), aes(y = profile.shape), col = "black", size = 2) + theme(legend.position = "none") + facet_grid(. ~ group, labeller = label_both) + coord_cartesian(ylim = c(0,2)) + ggtitle("Profile Assignment") + ylab("Gene Expression") + xlab("RpoS%")
+
+#examine how strong the correlations are:
+summary(regulated.normCount.tidy$maxCorr)
+```
+
+Comparing directional sensitivity classification to that created by pnbinom.
+SENS.POS
+```{r, eval=FALSE, include=FALSE}
+# found to be sensitive positive by correlation
+corr.sens.pos <- profile.scaledNormCountsByGene.6 %>%
+  filter(group == "sens.pos") 
+length(corr.sens.pos$genename) # 151 found
+
+#ggplot(data = corr.sens.pos.counts, aes(x = normCountScaled, y = MadisonCurveNormCountScaled, col = genename, shape = level)) + geom_point()
+matchup <- inner_join(old.sens.pos, corr.sens.pos, by = "genename")
+# what do the sens-pos correlations look like?
+summary(corr.sens.pos$maxCorr)
+# how does this classification differ from pnbinom?
+# pnbinom found sens Pos but grouping didn't
+sens.pos.noMatch <- anti_join(old.sens.pos, corr.sens.pos, by = "genename")
+# where do those genes live?
+results.corr <- inner_join(profile.scaledNormCountsByGene.6, sens.pos.noMatch, by = "genename") 
+results.corr %>%
+  group_by(group) %>%
+  summarise(identified.by.corr = n())
+
+summary(results.corr$sens.pos)
+
+# grouping found sens pos but pnbinom didn't!
+isSensPos.noMatch <- anti_join(corr.sens.pos, old.sens.pos, by = "genename")
+results.pnbinom <- inner_join(regulated.normCount.tidy, isSensPos.noMatch, by = "genename") 
+results.pnbinom %>%
+  group_by(DirectionalSensitivity) %>%
+  summarise(identified.by.pnbinom = n()/6)
+
+summary(results.pnbinom$sens.pos)
+```
+
+```{r, eval=FALSE, include=FALSE}
+#pvals vs correlation
+pval.data <- regulatedGenes.normCount %>% select(genename, adjusted.pval, DirectionalSensitivity)
+
+comparison <- inner_join(pval.data, profile.scaledNormCountsByGene.6, by = "genename") %>%
+  mutate(pval.sens.pos = ifelse(DirectionalSensitivity == "isSensPos", TRUE, FALSE),
+         corr.sens.pos = ifelse(group == "sens.pos", TRUE, FALSE),
+         pval.sens.neg = ifelse(DirectionalSensitivity == "isSensNeg", TRUE, FALSE),
+         corr.sens.neg = ifelse(group == "sens.neg", TRUE, FALSE),
+         pval.insens.pos = ifelse(DirectionalSensitivity == "isInsensPos", TRUE, FALSE),
+         corr.insens.pos = ifelse(group == "insens.pos", TRUE, FALSE),
+         pval.insens.neg = ifelse(DirectionalSensitivity == "isInsensNeg", TRUE, FALSE),
+         corr.insens.neg = ifelse(group == "insens.neg", TRUE, FALSE),
+         pval.neither.pos = ifelse(DirectionalSensitivity == "isNeitherPos", TRUE, FALSE),
+         corr.linear.pos = ifelse(group == "linear.pos", TRUE, FALSE),
+         pval.neither.neg = ifelse(DirectionalSensitivity == "isNeitherNeg", TRUE, FALSE),
+         corr.linear.neg = ifelse(group == "linear.neg", TRUE, FALSE))
+```
+```{r, eval=FALSE, include=FALSE}
+# sens pos comparison
+# compare which genes pnbinom found sensitive positive vs which genes correlation method found sensitive positive
+ggplot(data = comparison, aes(x = adjusted.pval, y = sens.pos, size = corr.sens.pos)) + geom_point(aes(fill = pval.sens.pos), alpha = 0.6, pch = 21) + xlim(0, .1) + geom_vline(xintercept =  0.05) + ggtitle("Pnbinom (pval) method versus correlation (profile assignment) method")
+#large blue circles are genes that both pnbinom and profile assignment by correlation method found sens pos
+# small blue circles are genes that pnbinom found sens pos but correlation method did not
+# large red circles are genes that correlation method found sens pos but pnbinom did not
+# small red circles are genes that neither method found sens pos
+
+both <- filter(comparison, pval.sens.pos == TRUE, corr.sens.pos == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Sensitive Positive")) + xlab("RpoS level")
+
+#plot which genes were considered sens pos by pval but not by corr
+pval.only <- filter(comparison, pval.sens.pos == TRUE, corr.sens.pos == FALSE)
+# how did corr classify the pval.only genes?
+pval.only %>% group_by(group) %>% summarise(n())
+
+ggplot(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(y = profile.shape), col = "black") + geom_line(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(pval.only$genename),"Genes Pnbinom found Sensitive Positive but Corr didn't")) + xlab("RpoS level")
+
+corr.only <- filter(comparison, pval.sens.pos == FALSE, corr.sens.pos == TRUE)
+# how did pnbinom classify the corr.only genes?
+corr.only %>% group_by(DirectionalSensitivity) %>% summarise(n())
+
+ggplot(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = profile.shape), col = "black", size = 1.5) + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = meanScaled), linetype = "dashed") + ggtitle(paste(length(corr.only$genename), "Genes Corr found Sens Positive but Pnbinom didn't")) + xlab("RpoS level")
+```
+
+Looking at the above plots, we see that the majority of genes match up for pnbinom and the correlation profile assignment method. We see that the 17 genes pnbinom found sensitive positive which the correlation method did not have a shallow slope, and were therefore grouped with linear.pos. Interestingly, pnbinom classified the 55 genes corr found sensitive positive which pnbinom did not as neither positive. Yet when we graph them, most of their shapes appears quite sensitive positive. We suspect this difference is because pnbinom will not find more variable significant and therefore place them into the "neither" category. 
+
+SENS.NEG
+```{r, eval=FALSE, include=FALSE}
+# sens neg comparison
+ggplot(data = comparison, aes(x = adjusted.pval, y = sens.neg, size = corr.sens.neg)) + geom_point(aes(fill = pval.sens.neg), alpha = 0.6, pch = 21) + xlim(0, 1) + geom_vline(xintercept =  0.05) + ggtitle("Pnbinom Method (pval) versus Profile Assignment Method (corr) for Sensitive Negative")
+
+both <- filter(comparison, pval.sens.neg == TRUE, corr.sens.neg == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Sensitive Negative")) + xlab("RpoS level")
+
+#no genes were considered sens neg by pval but not by corr
+pval.only <- filter(comparison, pval.sens.neg == TRUE, corr.sens.neg == FALSE)
+length(pval.only$genename) # none found
+
+corr.only <- filter(comparison, pval.sens.neg == FALSE, corr.sens.neg == TRUE)
+# but here are the genes considerend sens neg by corr but not by pval
+ggplot(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = profile.shape), col = "black", size = 1.5) + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = meanScaled), linetype = "dashed") + ggtitle(paste(length(corr.only$genename), "Genes Corr found Sensitive Negative but Pnbinom didn't")) + xlab("RpoS level")
+
+summary(corr.only$maxCorr)
+# relatively low maximum correlations
+summary(corr.only$maxCorr - corr.only$linear.neg)
+#small differences between sensitive negative correlation and linear negative correlation
+```
+
+We identify 109 genes as sensitive negative through correlating the means of means curve with correlations ranging from 0.747 to 0.999, 0.923 median and 0.917 mean. 
+In contrast, pnbinom found only 7 sensitive negative genes. All 7 of these are among the 109 found by correlation, with correlations ranging from 0.904 to 0.993, 0.943 median and 0.948 mean. 
+If we were to keep only the genes whose correlations are 0.90 or above, 77 would be identified as sensitive negative by correlation.
+All 102 of the genes correlation found sensitive negative but pnbinom did not were identified by pnbinom as neither negative.Their correlations ranged from 0.747 to 0.999, 0.923 median and 0.915 mean. 
+We see relatively low correlations and little differentiability between these correlations and correlations with the linear negative profile. 
+
+INSENS.POS
+```{r, eval=FALSE, include=FALSE}
+# insens pos comparison
+ggplot(data = comparison, aes(x = adjusted.pval, y = insens.pos, size = corr.insens.pos)) + geom_point(aes(fill = pval.insens.pos), alpha = 0.6, pch = 21) + xlim(0, 1) + geom_vline(xintercept =  0.05) + ggtitle("Pnbinom (p.val) vs Assignment Method (correlation) Classification of Genes into Insensitive Positive")
+
+both <- filter(comparison, pval.insens.pos == TRUE, corr.insens.pos == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Insensitive Positive")) + xlab("RpoS level")
+
+#no genes were considered sens pos by pval but not by corr
+pval.only <- filter(comparison, pval.insens.pos == TRUE, corr.insens.pos == FALSE)
+length(pval.only$genename)
+
+corr.only <- filter(comparison, pval.insens.pos == FALSE, corr.insens.pos == TRUE)
+
+ggplot(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = profile.shape), col = "black", size = 1.5) + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = meanScaled), linetype = "dashed") + ggtitle(paste(length(corr.only$genename), "Genes Corr found Insensitive Positive but Pnbinom didn't")) + xlab("RpoS level") + theme(legend.position = "none")
+
+summary(corr.only$maxCorr)
+summary(corr.only$maxCorr - corr.only$linear.pos) # REALLY small difference!
+```
+
+We see many more genes being identified by the correlation method as insensitive positive than by pnbinom. We also notice that the difference between the correlation for insens pos and linear pos is VERY small. This indistinguishability problem is a recurring theme.
+ 
+ INSENS NEG
+
+```{r, eval=FALSE, include=FALSE}
+# insens pos comparison
+ggplot(data = comparison, aes(x = adjusted.pval, y = insens.neg, size = corr.insens.neg)) + geom_point(aes(fill = pval.insens.neg), alpha = 0.6, pch = 21) + xlim(0, .24) + geom_vline(xintercept =  0.05) + ggtitle("Pnbinom vs Correlation Method for Insensitive Negative Classification")
+
+both <- filter(comparison, pval.insens.neg == TRUE, corr.insens.neg == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Insensitive Negative")) + xlab("RpoS level")
+
+#there are no genes were considered insens neg by pval but not by corr
+pval.only <- filter(comparison, pval.insens.neg == TRUE, corr.insens.neg == FALSE)
+length(pval.only$genename)
+
+# here are the genes considered insens neg by corr but not by pval
+corr.only <- filter(comparison, pval.insens.neg == FALSE, corr.insens.neg == TRUE)
+
+ggplot(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = profile.shape), col = "black", size = 1.5) + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = meanScaled), linetype = "dashed") + ggtitle(paste(length(corr.only$genename), "Genes Corr found Insensitive Negative but Pnbinom didn't")) + xlab("RpoS level") + theme(legend.position = "none")
+```
+
+LINEAR POS
+
+```{r, eval=FALSE, include=FALSE}
+# linear pos comparison
+ggplot(data = comparison, aes(x = adjusted.pval, y = linear.pos, size = corr.linear.pos)) + geom_point(aes(fill = pval.neither.pos), alpha = 0.6, pch = 21) + xlim(0, .24) + geom_vline(xintercept =  0.05) + ggtitle("Pnbinom and Correlation Method Comparison for Linear Positive Classification")
+
+both <- filter(comparison, pval.neither.pos == TRUE, corr.linear.pos == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black", size = 2) + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Linear Positive")) + xlab("RpoS level") + theme(legend.position = "none")
+
+#plot which genes were considered sens pos by pval but not by corr
+pval.only <- filter(comparison, pval.neither.pos == TRUE, corr.linear.pos == FALSE)
+  ggplot(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black", size = 2) + geom_line(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(pval.only$genename),"Genes Pnbinom found Linear Positive but Corr didn't")) + xlab("RpoS level") + theme(legend.position = "none")
+#how are these classified by correlation method?
+pval.only %>% group_by(group) %>% summarise(n())
+  
+corr.only <- filter(comparison, pval.neither.pos == FALSE, corr.linear.pos == TRUE)
+
+ggplot(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = profile.shape), col = "black") + geom_line(data = filter(regulated.normCount.tidy, genename %in% corr.only$genename), aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0, 2)) + xlab("RpoS level") + ggtitle(paste(length(corr.only$genename), "genes found Linear Pos by Corr but not by Pnbinom"))
+
+# how were they classified by pnbinom?
+corr.only %>% group_by(DirectionalSensitivity) %>% summarise(n())
+
+```
+
+Correlation found linear-looking genes which had been pnbinom-classified as sens.pos. It classified previously linear positive genes as sens.pos or insens.pos, and their shapes look confirming to this new classification style.
+
+LINEAR NEG
+```{r, eval=FALSE, include=FALSE}
+# linear neg comparison
+ggplot(data = comparison, aes(x = adjusted.pval, y = linear.neg, size = corr.linear.neg)) + geom_point(aes(fill = pval.neither.neg), alpha = 0.6, pch = 21) + xlim(0.04, 1.1) + geom_vline(xintercept =  0.05) + ggtitle("Compare Correlation Method and Pnbinom (p.val) Classification for Linear Negative")
+
+both <- filter(comparison, pval.neither.neg == TRUE, corr.linear.neg == TRUE)
+ggplot(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = meanScaled), linetype = "dashed") + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black", size = 2) + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(both$genename),"Genes Pnbinom and Correlation both found Linear Negative")) + xlab("RpoS level") + theme(legend.position = "none")
+
+#plot which genes were considered sens pos by pval but not by corr
+pval.only <- filter(comparison, pval.neither.neg == TRUE, corr.linear.neg == FALSE)
+  ggplot(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(x = nlevel, y = normCountScaled, col = genename)) + geom_point() + geom_line(data = filter(regulated.normCount.tidy, genename %in% both$genename), aes(y = profile.shape), col = "black", size = 2) + geom_line(data = filter(regulated.normCount.tidy, genename %in% pval.only$genename), aes(y = meanScaled), linetype = "dashed") + coord_cartesian(ylim = c(0, 2)) + ggtitle(paste(length(pval.only$genename),"Genes Pnbinom found Linear Negative but Corr didn't")) + xlab("RpoS level") + theme(legend.position = "none")
+#how are these classified by correlation method?
+pval.only %>% group_by(group) %>% summarise(n())
+  
+corr.only <- filter(comparison, pval.neither.neg == FALSE, corr.linear.neg == TRUE)
+length(corr.only$genename) # none found
+```
+
+# Plotting: Logged
+1. All Sensitive Positive Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "sens.pos"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "sens.pos"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("1. All Logged Sensitive Positive Genes") + ylim(-.5, 1.5)
+```
+  It seems like logging does make this one more readable and lets us keep the outlying ytfQ in the plot view. But rows with zero and less than 1 are made to look weird. Though I'm confused why there are normalized counts less than 1.
+  
+2. All Sensitive Negative Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "sens.neg"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "sens.neg"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("2. All Logged Sensitive Negative Genes") + theme(legend.position = "none")
+```
+The iconic sensitive negative shape rather disappears, espcially for the scaled counts closer to 1.
+
+3. All Insensitive Positive Genes
+
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "insens.pos"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "insens.pos"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("3. All Logged Insensitive Positive Genes") + ylim(-1, 1.2) + theme(legend.position = "none")
+```
+  We have a problem with the slope looking very different for these points! They almost all look sensitive now, rather than insensitive. Logging can certainly do that, so this isn't shocking but it shows us that log transformations might not be the best way to go with our data.
+  
+  As a close-up example, see the plot below as we follow one gene's change in slope between untransformed and transformed normCount. 
+```{r, eval=FALSE, include=FALSE}
+#UNLOGGED
+ggplot(data = filter(regulated.insens.pos.tidy, genename %in% c("yhiM")), aes(x = nlevel, y = normCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.insens.pos.tidy, genename %in% c("yhiM")), aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.insens.pos.KO_WT.tidy, genename %in% c("yhiM")), method = "lm", alpha = 0.6, linetype = "solid") + ggtitle("Unlogged yhiM (insensitive positive)")
+
+#LOGGED
+ggplot(data = filter(regulated.insens.pos.tidy, genename %in% c("yhiM")), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.insens.pos.tidy, genename %in% c("yhiM")), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.insens.pos.KO_WT.tidy, genename %in% c("yhiM")), method = "lm", alpha = 0.6, linetype = "solid") + ggtitle("Logged yhiM (appears sensitive positive)")
+```
+
+4. All Insensitive Negative Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "insens.neg"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "insens.neg"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("4. All Logged Insensitive Negative Genes")
+```
+  Logging does help mitigate the variability and allows us to see every gene on the same plot, but I am still concerned about the accuracy of ibpB's 26% measurement.
+5. All Linear Positive Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "linear.pos"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "linear.pos"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("5. All Logged Linear Positive Genes") + ylim(-.55, 1.1) + theme(legend.position = "none")
+```
+  These certainly don't look linear positive. 
+  
+6. 40 Neither Negative Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.normCount.tidy, group == "linear.neg"), aes(x = nlevel, y = logNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.normCount.tidy, group == "linear.neg"), aes(y=meanScaledLog), alpha = 0.6, linetype = "dashed") + ggtitle("6. 40 Logged Linear Negative Genes") + ylim(0, 1.15) + theme(legend.position = "none")
+```
+
+
+In conclusion, I am not a fan of this particular log transformation on the data. Because the correlation profile assignment is done on the UNLOGGED data, logging is purely for visualization purposes. However, the slopes are very different on the logged data and this is confusing when we are classifying genes based on shapes. Furthermore, logging removes zero counts (because their output is undefined in the log function) and we're getting weird negative values.
+
+Looking into DESeq suggestions for transofrmations, there are others I try below. They are all on the log scale however, so although the undefined/negative value problems goes away, the slope problem is not solved. In conclusion, I would recommend not using logged data for visualization. 
+
+#Pseudo-Logged Plots (log2(normCount + 1)
+Make the table of normalized counts
+```{r, eval=FALSE, include=FALSE}
+pseudoNormCounts.3Cond <- log2(counts(cds.3Cond, normalized = TRUE) + 1)
+# get three-way normalized counts comparison
+pseudoNormCounts.3Cond <- as.data.frame(pseudoNormCounts.3Cond) %>%
+                            mutate(geneid = rownames(countsTable.4Cond))
+
+regulatedGenes.pseudoCount <- left_join(regulatedGenes, pseudoNormCounts.3Cond, by = "geneid") %>%
+                    mutate(plogNormCountKO1 = ko1, plogNormCountKO2 = ko2,
+                           plogNormCountLO1 = lo1, plogNormCountLO2 = lo2,
+                           plogNormCountWT1 = wt1, plogNormCountWT2 = wt2)
+```
+
+```{r, eval=FALSE, include=FALSE}
+# data frame of regulated genes with the variables
+# genename, Sensitivity (sensitive, insensitive, or neither), DirectionalSensitivity (specifies positive or negative), RpoSlevel, sample, and plogNormCount (normalized count undergoes a log2 + 1 transformation), plogExpressionProportion
+regulated.plog.tidy <- regulatedGenes.pseudoCount %>% 
+                select(genename, plogNormCountKO1, plogNormCountKO2,
+                       plogNormCountLO1, plogNormCountLO2,
+                       plogNormCountWT1,
+                       plogNormCountWT2, Sensitivity, DirectionalSensitivity)  %>%
+                # key: , value: normCount
+                gather(level, plogNormCount, -genename, -Sensitivity, -DirectionalSensitivity) %>%
+                separate(level, c("level", "sample"), 15) %>%
+                arrange(genename, level) %>%
+                mutate(level = replace(level, level == "plogNormCountKO",
+                                               "KO"),
+                       level = replace(level, level == "plogNormCountLO",
+                                               "LO"),
+                       level = replace(level, level == "plogNormCountWT",
+                                               "WT")) %>% 
+                mutate(nlevel = ifelse(level == "KO", 0,
+                                       ifelse(level == "LO", 0.26, 1)),
+                       nlevel = as.numeric(nlevel)) %>%
+                group_by(genename, level) %>%
+                    mutate(levelMean = mean(plogNormCount)) %>%
+                ungroup() %>%
+                group_by(genename) %>%
+mutate(scaler = ifelse(DirectionalSensitivity %in% c("isNeitherPos", "isSensPos", "isInsensPos") , levelMean[5], levelMean[1]), # what we're scaling the y-axis by (mean(ko1,ko2) if neg; mean(wt1, wt2) if pos)
+      meanScaled = levelMean/scaler,
+      plogNormCountScaled = plogNormCount/scaler) 
+```
+
+```{r, eval=FALSE, include=FALSE}
+regulated.plog.isSensPos.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isSensPos") 
+
+regulated.plog.isSensNeg.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isSensNeg") 
+
+regulated.plog.isInsensPos.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isInsensPos") 
+
+regulated.plog.isInsensNeg.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isInsensNeg") 
+
+regulated.plog.isNeitherPos.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isNeitherPos") 
+
+regulated.plog.isNeitherNeg.tidy <- filter(regulated.plog.tidy, DirectionalSensitivity == "isNeitherNeg") 
+
+
+regulated.plog.KO_WT.tidy <- regulated.plog.tidy %>%
+                          filter(level %in% c("KO", "WT"))
+```
+
+Try correlation on log2(normCount + 1) data
+```{r, eval=FALSE, include=FALSE}
+regulated.plog.isSensPos.tidy <- regulated.plog.isSensPos.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.sens.pos <- c(regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isSensPos.tidy$MadisonCurveNormCountScaled[6])
+
+regulated.plog.isSensNeg.tidy <- regulated.plog.isSensNeg.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.sens.neg <- c(regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isSensNeg.tidy$MadisonCurveNormCountScaled[6])
+
+regulated.plog.isInsensPos.tidy <- regulated.plog.isInsensPos.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.insens.pos <- c(regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isInsensPos.tidy$MadisonCurveNormCountScaled[6])
+
+regulated.plog.isInsensNeg.tidy <- regulated.plog.isInsensNeg.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.insens.neg <- c(regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isInsensNeg.tidy$MadisonCurveNormCountScaled[6])
+
+regulated.plog.isNeitherPos.tidy <- regulated.plog.isNeitherPos.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.neither.pos <- c(regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isNeitherPos.tidy$MadisonCurveNormCountScaled[6])
+
+regulated.plog.isNeitherNeg.tidy <- regulated.plog.isNeitherNeg.tidy %>%
+  group_by(nlevel) %>%
+  mutate(MadisonCurveNormCountScaled = mean(meanScaled))
+
+profile.plog.neither.neg <- c(regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[1], regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[2], regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[3], regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[4], regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[5], regulated.plog.isNeitherNeg.tidy$MadisonCurveNormCountScaled[6])
+
+profile.plog.6 <- data.frame(sens.pos = profile.plog.sens.pos, sens.neg = profile.plog.sens.neg, insens.pos = profile.plog.insens.pos, insens.neg = profile.plog.insens.neg, neither.pos = profile.plog.neither.pos, neither.neg = profile.plog.neither.neg)
+
+plog.scaledNormCountsByGene.6 <- regulated.plog.tidy %>%
+  select(genename, level, sample, plogNormCount) %>%
+  unite(level.sample, level, sample) %>%
+  reshape2::dcast(level.sample ~ genename) %>%
+  select(-1)
+
+# using normCounts (3 levels, 2 at each level)
+profile.plog.scaledNormCountsByGene.6 <- as.data.frame(t(cor(profile.plog.6, plog.scaledNormCountsByGene.6))) 
+rownames <- row.names(profile.plog.scaledNormCountsByGene.6)
+rowMax <- rowMax(as.matrix(profile.plog.scaledNormCountsByGene.6))
+profile.plog.scaledNormCountsByGene.6 <- profile.plog.scaledNormCountsByGene.6 %>%
+  mutate(genename = rownames, 
+         maxCorr = rowMax, # find in which classification maximum correlation lives
+         group = ifelse(maxCorr == neither.pos, "neither.pos", 
+                        ifelse(maxCorr == neither.neg, "neither.neg",
+                               ifelse(maxCorr == insens.pos, "insens.pos",
+                                      ifelse(maxCorr == insens.neg, "insens.neg",
+                                             ifelse(maxCorr == sens.pos, "sens.pos", "sens.neg"))))))
+
+```
+
+SENS.POS
+```{r, eval=FALSE, include=FALSE}
+corr.plog.sens.pos <- profile.plog.scaledNormCountsByGene.6 %>%
+  filter(group == "sens.pos")
+
+corr.plog.sens.pos.counts <- regulated.plog.tidy %>%
+  filter(genename %in% corr.plog.sens.pos$genename) %>%
+  group_by(genename) %>%
+  mutate(MadisonCurveNormCountScaled = profile.plog.sens.pos)
+ggplot(data = corr.plog.sens.pos.counts, aes(x = nlevel, y = plogNormCountScaled)) + geom_point() + geom_line(data = corr.plog.sens.pos.counts, aes(y = MadisonCurveNormCountScaled))
+
+# plog found but regular did not
+length(corr.plog.sens.pos$genename) #175
+length(anti_join(corr.plog.sens.pos, corr.sens.pos)$genename) #175#
+# ALL GENES FOUND BY CORR.PLOG WERE NOT FOUND BY REGULAR CORR!
+
+# regular found but plog did not
+length(corr.sens.pos$genename)
+length(anti_join(corr.sens.pos, corr.plog.sens.pos)$genename) #115
+# ALL GENES FOUND BY Regular CORR WERE NOT FOUND BY plog CORR!
+```
+
+
+data frames needed
+
+1. All Sensitive Positive Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isSensPos.tidy, aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isSensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy, DirectionalSensitivity == "isSensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("1. All Sensitive Positive Genes : log2(normCount + 1)")
+```
+2. All Sens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isSensNeg.tidy, aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isSensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy, DirectionalSensitivity == "isSensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("2. All Sensitive Negative Genes : log2(normCount) + 1")
+```
+3. All Insensitive Positive  - !!! Same problem! Obviously.
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isInsensPos.tidy, aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isInsensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("3. All Insensitive Positive Genes : log2(normCount) + 1")
+```
+  * just ymdF
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.plot.isInsensPos.tidy, genename == "ymdF"), aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.plot.isInsensPos.tidy, genename == "ymdF"), aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(filter(regulated.plog.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), genename == "ymdF"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("ymdF, supposed to be InsensPos : log2(normCount) + 1")
+```
+4. All Insens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isInsensNeg.tidy, aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isInsensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy, DirectionalSensitivity == "isInsensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("4. All Insensitive Negative Genes : log2(normCount) + 1")
+```
+5. First 40 Neither Pos
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isNeitherPos.tidy[1:240, ], aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isNeitherPos.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("5. First 40 Neither Positive Genes : log2(normCount) + 1")
+```
+6. First 40 neither neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.plot.isNeitherNeg.tidy[1:240, ], aes(x = nlevel, y = plogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.plot.isNeitherNeg.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.plog.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("6. First 40 Neither Negative Genes : log2(normCount) + 1")
+```
+
+#rlog plots
+```{r, eval=FALSE, include=FALSE}
+rlogNormCounts.3Cond <- assay(rlog.cds.3Cond) # access normalized rlog counts
+# get three-way normalized counts comparison
+rlogNormCounts.3Cond <- as.data.frame(rlogNormCounts.3Cond) %>%
+                            mutate(geneid = rownames(countsTable.4Cond))
+
+regulatedGenes.rlogCount <- left_join(regulatedGenes, rlogNormCounts.3Cond, by = "geneid") %>%
+                    rename(rlogNormCountKO1 = ko1, rlogNormCountKO2 = ko2,
+                           rlogNormCountLO1 = lo1, rlogNormCountLO2 = lo2,
+                           rlogNormCountWT1 = wt1, rlogNormCountWT2 = wt2)
+```
+```{r, eval=FALSE, include=FALSE}
+# data frame of regulated genes with the variables
+# genename, Sensitivity (sensitive, insensitive, or neither), DirectionalSensitivity (specifies positive or negative), RpoSlevel, sample, and rlogNormCount (normalized counts from variance stabilizing transformation), rlogNormCountScaled
+regulated.rlog.tidy <- regulatedGenes.rlogCount %>% 
+                select(genename, rlogNormCountKO1, rlogNormCountKO2,
+                       rlogNormCountLO1, rlogNormCountLO2,
+                       rlogNormCountWT1,
+                       rlogNormCountWT2, Sensitivity, DirectionalSensitivity)  %>%
+                # key: , value: normCount
+                gather(level, rlogNormCount, -genename, -Sensitivity, -DirectionalSensitivity) %>%
+                separate(level, c("level", "sample"), 15) %>%
+                arrange(genename, level) %>%
+                mutate(level = replace(level, level == "rlogNormCountKO",
+                                               "KO"),
+                       level = replace(level, level == "rlogNormCountLO",
+                                               "LO"),
+                       level = replace(level, level == "rlogNormCountWT",
+                                               "WT")) %>% 
+                mutate(nlevel = ifelse(level == "KO", 0,
+                                       ifelse(level == "LO", 0.26, 1)),
+                       nlevel = as.numeric(nlevel)) %>%
+                rename(RpoSlevel = level) %>%
+                group_by(genename, RpoSlevel) %>%
+                    mutate(levelMean = mean(rlogNormCount)) %>%
+                ungroup() %>%
+                group_by(genename) %>%
+mutate(scaler = ifelse(DirectionalSensitivity %in% c("isNeitherPos", "isSensPos", "isInsensPos") , levelMean[5], levelMean[1]), # what we're scaling the y-axis by (mean(ko1,ko2) if neg; mean(wt1, wt2) if pos)
+      meanScaled = levelMean/scaler,
+      rlogNormCountScaled = rlogNormCount/scaler) 
+```
+data frames needed
+```{r, eval=FALSE, include=FALSE}
+regulated.rlog.isSensPos.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isSensPos") 
+
+regulated.rlog.isSensNeg.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isSensNeg") 
+
+regulated.rlog.isInsensPos.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isInsensPos") 
+
+regulated.rlog.isInsensNeg.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isInsensNeg") 
+
+regulated.rlog.isNeitherPos.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isNeitherPos") 
+
+regulated.rlog.isNeitherNeg.tidy <- filter(regulated.rlog.tidy, DirectionalSensitivity == "isNeitherNeg") 
+
+
+regulated.rlog.KO_WT.tidy <- regulated.rlog.tidy %>%
+                          filter(RpoSlevel %in% c("KO", "WT"))
+```
+
+1. All Sensitive Positive Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isSensPos.tidy, aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isSensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy, DirectionalSensitivity == "isSensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("1. All Sensitive Positive Genes : Regularized Log")
+```
+2. All Sens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isSensNeg.tidy, aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isSensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy, DirectionalSensitivity == "isSensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("2. All Sensitive Negative Genes : Regularized Log")
+```
+3. All Insensitive Positive  - !!! Same problem again!
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isInsensPos.tidy, aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isInsensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("3. All Insensitive Positive Genes : Regularized Log")
+```
+  * just ymdF
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.rlog.isInsensPos.tidy, genename == "ymdF"), aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.rlog.isInsensPos.tidy, genename == "ymdF"), aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(filter(regulated.rlog.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), genename == "ymdF"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("ymdF, supposed to be InsensPos : Regularized Log")
+```
+4. All Insens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isInsensNeg.tidy, aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isInsensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy, DirectionalSensitivity == "isInsensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("4. All Insensitive Negative Genes : Regularized Log") + coord_cartesian(ylim = c(0.75, 1.25))
+```
+5. First 40 Neither Pos
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isNeitherPos.tidy[1:240, ], aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isNeitherPos.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("5. First 40 Neither Positive Genes : Regularized Log")
+```
+6. First 40 neither neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.rlog.isNeitherNeg.tidy[1:240, ], aes(x = nlevel, y = rlogNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.rlog.isNeitherNeg.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.rlog.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("6. First 40 Neither Negative Genes : Regularized Log")
+```
+#vst plots
+(use as long as size factors don't vary too much)
+```{r, eval=FALSE, include=FALSE}
+vstNormCounts.3Cond <- assay(vst.cds.3Cond) # access normalized vst counts
+# get three-way normalized counts comparison
+vstNormCounts.3Cond <- as.data.frame(vstNormCounts.3Cond) %>%
+                            mutate(geneid = rownames(countsTable.4Cond))
+
+regulatedGenes.vstCount <- left_join(regulatedGenes, vstNormCounts.3Cond, by = "geneid") %>%
+                    rename(vstNormCountKO1 = ko1, vstNormCountKO2 = ko2,
+                           vstNormCountLO1 = lo1, vstNormCountLO2 = lo2,
+                           vstNormCountWT1 = wt1, vstNormCountWT2 = wt2)
+```
+```{r, eval=FALSE, include=FALSE}
+# data frame of regulated genes with the variables
+# genename, Sensitivity (sensitive, insensitive, or neither), DirectionalSensitivity (specifies positive or negative), RpoSlevel, sample, and vstNormCount (normalized counts from variance stabilizing transformation), vstNormCountScaled
+regulated.vst.tidy <- regulatedGenes.vstCount %>% 
+                select(genename, vstNormCountKO1, vstNormCountKO2,
+                       vstNormCountLO1, vstNormCountLO2,
+                       vstNormCountWT1,
+                       vstNormCountWT2, Sensitivity, DirectionalSensitivity)  %>%
+                # key: , value: normCount
+                gather(level, vstNormCount, -genename, -Sensitivity, -DirectionalSensitivity) %>%
+                separate(level, c("level", "sample"), 14) %>%
+                arrange(genename, level) %>%
+                mutate(level = replace(level, level == "vstNormCountKO",
+                                               "KO"),
+                       level = replace(level, level == "vstNormCountLO",
+                                               "LO"),
+                       level = replace(level, level == "vstNormCountWT",
+                                               "WT")) %>% 
+                mutate(nlevel = ifelse(level == "KO", 0,
+                                       ifelse(level == "LO", 0.26, 1)),
+                       nlevel = as.numeric(nlevel)) %>%
+                rename(RpoSlevel = level) %>%
+                group_by(genename, RpoSlevel) %>%
+                    mutate(levelMean = mean(vstNormCount)) %>%
+                ungroup() %>%
+                group_by(genename) %>%
+mutate(scaler = ifelse(DirectionalSensitivity %in% c("isNeitherPos", "isSensPos", "isInsensPos") , levelMean[5], levelMean[1]), # what we're scaling the y-axis by (mean(ko1,ko2) if neg; mean(wt1, wt2) if pos)
+      meanScaled = levelMean/scaler,
+      vstNormCountScaled = vstNormCount/scaler) 
+```
+data frames needed
+```{r, eval=FALSE, include=FALSE}
+regulated.vst.isSensPos.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isSensPos") 
+
+regulated.vst.isSensNeg.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isSensNeg") 
+
+regulated.vst.isInsensPos.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isInsensPos") 
+
+regulated.vst.isInsensNeg.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isInsensNeg") 
+
+regulated.vst.isNeitherPos.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isNeitherPos") 
+
+regulated.vst.isNeitherNeg.tidy <- filter(regulated.vst.tidy, DirectionalSensitivity == "isNeitherNeg") 
+
+
+regulated.vst.KO_WT.tidy <- regulated.vst.tidy %>%
+                          filter(RpoSlevel %in% c("KO", "WT"))
+```
+
+1. All Sensitive Positive Genes
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isSensPos.tidy, aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isSensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy, DirectionalSensitivity == "isSensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("1. All Sensitive Positive Genes : Variance Stabilizing Transformation")
+```
+2. All Sens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isSensNeg.tidy, aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isSensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy, DirectionalSensitivity == "isSensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("2. All Sensitive Negative Genes : Variance Stabilizing Transformation")
+```
+3. All Insensitive Positive  - !!! Same problem again!
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isInsensPos.tidy, aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isInsensPos.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("3. All Insensitive Positive Genes : Variance Stabilizing Transformation")
+```
+  * just ymdF
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = filter(regulated.vst.isInsensPos.tidy, genename == "ymdF"), aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = filter(regulated.vst.isInsensPos.tidy, genename == "ymdF"), aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(filter(regulated.vst.KO_WT.tidy, DirectionalSensitivity == "isInsensPos"), genename == "ymdF"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("ymdF, supposed to be InsensPos : Variance Stabilizing Transformation")
+```
+4. All Insens Neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isInsensNeg.tidy, aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isInsensNeg.tidy, aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy, DirectionalSensitivity == "isInsensNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("4. All Insensitive Negative Genes : Variance Stabilizing Transformation") + coord_cartesian(ylim = c(0.8, 1.25))
+```
+5. First 40 Neither Pos
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isNeitherPos.tidy[1:240, ], aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isNeitherPos.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherPos"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("5. First 40 Neither Positive Genes : Variance Stabilizing Transformation")
+```
+6. First 40 neither neg
+```{r, eval=FALSE, include=FALSE}
+ggplot(data = regulated.vst.isNeitherNeg.tidy[1:240, ], aes(x = nlevel, y = vstNormCountScaled, col = genename, group = genename)) + geom_point(alpha = 0.8) + geom_line(data = regulated.vst.isNeitherNeg.tidy[1:240, ], aes(y=meanScaled), alpha = 0.6, linetype = "dashed") + geom_line(stat = "smooth", data = filter(regulated.vst.KO_WT.tidy[1:160, ], DirectionalSensitivity == "isNeitherNeg"), method = "lm", alpha = 0.6, linetype = "solid", se = FALSE) + ggtitle("6. First 40 Neither Negative Genes : Variance Stabilizing Transformation")
+```
+

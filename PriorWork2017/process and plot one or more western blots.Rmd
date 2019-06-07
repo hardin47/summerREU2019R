@@ -1,0 +1,138 @@
+---
+title: "processing and plotting data from multiple western blots"
+author: "Dan Stoebel"
+date: "May 25, 2017"
+output: html_notebook
+---
+This script will parse multiple data files from multiple experiments.The goal is to do as much parsing as possible in R, and as little as possible in Excel.
+
+The only thing that should happen in Excel is that in each origional data file, add three columns. They are "protein", "strain", and "araConc", which take the following values:
+
+- protein - RpoS or RpoD
+- strain - DMS2670, DMS2537, etc
+- araConc - the concentration of arabinose added, a numerical value, possibly zero.
+
+Then, save the columns "protein", "strain", and "araConc", "signal" as a text file, with the date of the experiment as the name. "signal" is the pixel intensity of the band of the western blot, i.e. the amount of protein present.
+
+Once this processing is done, the rest happens in R.
+
+First, we enter the names of all of our files and the dates they occured on.
+```{r}
+files <- c("2017-02-28 blot.txt", "2017-03-02 blot.txt", "2017-03-07 blot.txt", "2017-03-09 blot.txt", "2017-03-22 blot.txt", "2017-03-23 blot.txt")  #This is a vector of the files that contain the data. 
+
+dates <- c("Feb-28", "Mar-02", "Mar-07", "Mar-09", "Mar-22", "Mar-23")#This is a vector of the dates that experiments happened on. I suppose we ought to be able to get this from the file names directly if we wanted to.
+```
+
+
+Here, we process each data file and combine them in a loop. I'm sure that this can be done in a more R like manner, but this seems to work. 
+
+In addition to combining and formatting all of the data, we create a new variable "RpoS/RpoD". This ratio is the value we are intersted in measuring. In the experiments analyzed here, the amounts of two different proteins are measured: RpoS and RpoD. RpoS levels have been varied by the experimenter, but the variability we observe likely has other sources of error. One known is that the total amount of all proteins in each measurement is likely different. To get around that, we also measure a protein whose levels we expect to be constant with respect to RpoS levels. This protein is RpoD, and we use RpoD levels as a proxy for total proteins when doing this normalization. This type of normalization is standard in the analysis of western blots. (There is a second bioloigcal reason for doing this normalization: due to a phenomon called sigma-factor competition, the ratio of RpoS/RpoD is probably a more bioloigcally meaningful measurement of RpoS activity in the cell than RpoS levels alone. See: Farewell, A, K Kvint, and T Nyström. “Negative Regulation by RpoS: A Case of Sigma Factor Competition.” Molecular Microbiology 29, no. 4 (August 1998): 1039–51. )
+
+
+```{r}
+combinedData <- data.frame()  #Initialize this outisde the loop so it is avaliable later
+
+for (i in 1:length(files)){
+  inputData <- read.table(files[i], header=T)   #Read one file
+  splitFrame <- split(inputData, inputData$protein) # Split up the data frame by protein
+  
+  #Now build a new data frame with things arranged as I want.
+  #The new columns are the strain, the arabinose concentration, the amount of RpoS, the amount of RpoD, and the ratio of the two.
+  
+  currentData <- data.frame(dates[i], splitFrame$RpoS$strain, splitFrame$RpoS$araConc, splitFrame$RpoS$signal, splitFrame$RpoD$signal, splitFrame$RpoS$signal/splitFrame$RpoD$signal) 
+  
+  colnames(currentData) <- c("date", "strain", "araConc", "rpoS", "rpoD", "rpoS/rpoD") #Give the columns proper names.
+  
+  aveDMS2537 <- mean(currentData$"rpoS/rpoD"[currentData$strain=="DMS2537"])#Strain DMS2537 is wild-type, so we take it as 100% RpoS level.
+  normedRpoS <- 100*currentData$"rpoS/rpoD"/aveDMS2537 #Create a new vector of normed RpoS levels.
+  
+  currentData <- data.frame(currentData, normedRpoS) #Add the normed RpoS vector to the current data file
+  
+  if(length(combinedData) == 0){ #If this is the first time through, save currentData as combinedData
+    combinedData <- currentData
+    }
+  else{ #If there is already something in combinedData, add the currentData to it.
+    combinedData <- merge(combinedData, currentData, all=T)
+    
+  }  
+  
+}
+  
+```
+
+Plot the raw data with a log x-axis. This log scale means that zero arabinose can't be plotted. To solve this, I'll add 10^-6 to each arabinose concentration.
+```{r}
+library("sfsmisc") #This package has a nice function for plotting log-scale axis with minor tick marks.
+
+par(mar= par("mar")+ c(0,1,0,0))
+
+plot(normedRpoS~araConc, data=combinedData, subset=strain=="DMS2670"&araConc>0, log="x", xlab="% arabinose added", ylab="% of wild-type RpoS expression", axes=F, cex=1.5, cex.lab=1.25, pch=1, col=date, ylim=c(0,400))
+eaxis(1, cex.axis=1, at=c(10^-(0:6)))
+axis(2, cex.axis=1)
+legend(10^-5, 400, dates, col=1:6, pch=1)
+
+```
+
+Plot the means and standard errors rather than raw data:
+
+First, calculate the means and standard errors
+```{r}
+rpoSmean <- tapply(X = combinedData$normedRpoS, INDEX = list(combinedData$strain, as.factor(combinedData$araConc)), FUN = mean)
+rpoSsd <- tapply(X = combinedData$normedRpoS, INDEX = list(combinedData$strain, as.factor(combinedData$araConc)), FUN = sd)
+rpoSlength <- tapply(X = combinedData$normedRpoS, INDEX = list(combinedData$strain, as.factor(combinedData$araConc)), FUN = length)
+rpoSse <- rpoSsd/sqrt(rpoSlength)
+```
+
+Plot the means and SEs
+
+```{r}
+library("sfsmisc")
+rpoSmeanToPlot <- rpoSmean[2,2:10] #Dropping conditions in columns 11 and 12 because there is only a single replicate. These are very high arabinose concentrations that I only did in a single experiment to explore the range. 
+rpoSseToPlot <- rpoSse[2,2:10]
+
+par(mar=par("mar") + c(0,1,0,0))
+
+plot(rpoSmeanToPlot~as.numeric(names(rpoSmeanToPlot)), log="x", xlab="% arabinose added", ylab="% of wild-type RpoS expression", axes=F, cex=1.5, cex.lab=1.25, pch=16, ylim=c(0,250))
+  
+
+arrows(x0 = as.numeric(names(rpoSmeanToPlot)), y0 = rpoSmeanToPlot, x1 = as.numeric(names(rpoSmeanToPlot)), y1 = rpoSmeanToPlot + rpoSseToPlot, length = .04, angle = 90)
+  
+arrows(x0 = as.numeric(names(rpoSmeanToPlot)), y0 = rpoSmeanToPlot, x1 = as.numeric(names(rpoSmeanToPlot)), y1 = rpoSmeanToPlot - rpoSseToPlot, length = .04, angle = 90)
+
+
+eaxis(1, cex.axis=1, at=c(10^-(0:6)))
+axis(2, cex.axis=1)
+
+```
+
+The final measurements of RpoS level are 
+```{r}
+rpoSlevels <- data.frame(round(rpoSmean["DMS2670",],2))
+colnames(rpoSlevels) <-"rpoSlevel"
+rpoSlevels
+
+```
+
+A plot with just the levels used for this RNA-seq experiment. We used concentations of 0,1e-5, 5e-5, 1e-4, 1e-3, 2e-3, 5e-3.
+```{r}
+library("sfsmisc")
+
+araColsUsed <- c(1,2,3,4,7,8,9) #These columns are the ones for the RpoS levels we used for the RNAseq experiment
+
+rpoSmeanToPlot <- rpoSmean[2,araColsUsed] #Dropping conditions in columns 11 and 12 because there is only a single replicate. These are very high arabinose concentrations that I only did in a single experiment to explore the range. 
+rpoSseToPlot <- rpoSse[2,araColsUsed]
+
+par(mar=par("mar") + c(0,1,0,0))
+
+plot(rpoSmeanToPlot~as.numeric(names(rpoSmeanToPlot)), log="x", xlab="% arabinose added", ylab="% of wild-type RpoS expression", axes=F, cex=1.5, cex.lab=1.25, pch=16, ylim=c(0,250))
+  
+
+arrows(x0 = as.numeric(names(rpoSmeanToPlot)), y0 = rpoSmeanToPlot, x1 = as.numeric(names(rpoSmeanToPlot)), y1 = rpoSmeanToPlot + rpoSseToPlot, length = .04, angle = 90)
+  
+arrows(x0 = as.numeric(names(rpoSmeanToPlot)), y0 = rpoSmeanToPlot, x1 = as.numeric(names(rpoSmeanToPlot)), y1 = rpoSmeanToPlot - rpoSseToPlot, length = .04, angle = 90)
+
+
+eaxis(1, cex.axis=1, at=c(10^-(0:6)))
+axis(2, cex.axis=1)
+```
+
